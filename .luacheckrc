@@ -4,5 +4,6 @@ exclude_files = {
 }
 globals = {
   "lovr",
+  "quaternion",
 }
 max_line_length = 100
