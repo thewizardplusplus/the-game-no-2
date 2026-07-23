@@ -2,7 +2,7 @@
 
 [![lint](https://github.com/thewizardplusplus/the-game-no-2/actions/workflows/lint.yaml/badge.svg)](https://github.com/thewizardplusplus/the-game-no-2/actions/workflows/lint.yaml)
 
-![](docs/screenshots/screenshot.png)
+![](docs/screenshots/screenshot_01.png)
 
 ## Running
 
