@@ -8,6 +8,7 @@ for _, module in ipairs({
   "models.floorsection",
   "models.room",
   "models.wall",
+  "pkg.fpcontroller.init",
 }) do
   require(module .. "_test")
 end

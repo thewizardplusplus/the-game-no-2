@@ -5,6 +5,7 @@ file = {
   "models/floorsection.lua",
   "models/room.lua",
   "models/wall.lua",
+  "pkg/fpcontroller/init.lua",
 }
 topics = {
   "README.md",

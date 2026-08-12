@@ -26,6 +26,9 @@ function lovr.conf(config)
 
   config.version = "0.19.0"
 
+  -- this is a flatscreen game; the headset simulator otherwise owns the
+  -- mouse mode and only captures it while the left button is held
+  config.modules.headset = false
   config.window.resizable = true
 
   _set_title(config, "The Game No. 2")
