@@ -1,0 +1,679 @@
+local luaunit = require("luaunit")
+local middleclass = require("middleclass")
+local assertions = require("luatypechecks.assertions")
+local CarryController = require("pkg.fpcontroller.carrycontroller")
+local rotation = require("pkg.fpcontroller.utils.rotation")
+local _ENV = require("compat53.module")
+if _VERSION == "Lua 5.1" then
+  setfenv(1, _ENV)
+end
+
+-- MockCollider
+
+local MockCollider = middleclass("MockCollider")
+
+function MockCollider:initialize()
+  self.tag = "dynamic"
+  self.x, self.y, self.z = 0, 0, 0
+  self.center_x, self.center_y, self.center_z = 0, 0, 0
+  self.angle, self.axis_x, self.axis_y, self.axis_z = 0, 0, 1, 0
+  self.velocity_x, self.velocity_y, self.velocity_z = 0, 0, 0
+  self.angular_velocity_x, self.angular_velocity_y, self.angular_velocity_z = 0, 0, 0
+  self.linear_damping, self.angular_damping = 0.05, 0.1
+  self.gravity_scale = 1
+  self.mass = 20
+  self.inertia_x, self.inertia_y, self.inertia_z = 1, 1, 1
+  self.linear_velocity_set_count, self.angular_velocity_set_count = 0, 0
+end
+
+-- MockCollider / Motion
+
+function MockCollider:setPosition(x, y, z)
+  assertions.is_number(x)
+  assertions.is_number(y)
+  assertions.is_number(z)
+
+  self.x, self.y, self.z = x, y, z
+end
+
+function MockCollider:getOrientation()
+  return self.angle, self.axis_x, self.axis_y, self.axis_z
+end
+
+function MockCollider:getWorldPoint(x, y, z)
+  assertions.is_number(x)
+  assertions.is_number(y)
+  assertions.is_number(z)
+
+  return self.x + x, self.y + y, self.z + z
+end
+
+function MockCollider:getLinearVelocity()
+  return self.velocity_x, self.velocity_y, self.velocity_z
+end
+
+function MockCollider:setLinearVelocity(x, y, z)
+  assertions.is_number(x)
+  assertions.is_number(y)
+  assertions.is_number(z)
+
+  self.velocity_x, self.velocity_y, self.velocity_z = x, y, z
+  self.linear_velocity_set_count = self.linear_velocity_set_count + 1
+end
+
+function MockCollider:getAngularVelocity()
+  return self.angular_velocity_x, self.angular_velocity_y, self.angular_velocity_z
+end
+
+function MockCollider:setAngularVelocity(x, y, z)
+  assertions.is_number(x)
+  assertions.is_number(y)
+  assertions.is_number(z)
+
+  self.angular_velocity_x, self.angular_velocity_y, self.angular_velocity_z = x, y, z
+  self.angular_velocity_set_count = self.angular_velocity_set_count + 1
+end
+
+function MockCollider:applyForce(x, y, z)
+  assertions.is_number(x)
+  assertions.is_number(y)
+  assertions.is_number(z)
+
+  self.applied_force = {x, y, z}
+end
+
+function MockCollider:applyTorque(x, y, z)
+  assertions.is_number(x)
+  assertions.is_number(y)
+  assertions.is_number(z)
+
+  self.applied_torque = {x, y, z}
+end
+
+function MockCollider:getLinearDamping()
+  return self.linear_damping
+end
+
+function MockCollider:setLinearDamping(value)
+  assertions.is_number(value)
+
+  self.linear_damping = value
+end
+
+function MockCollider:getAngularDamping()
+  return self.angular_damping
+end
+
+function MockCollider:setAngularDamping(value)
+  assertions.is_number(value)
+
+  self.angular_damping = value
+end
+
+function MockCollider:getGravityScale()
+  return self.gravity_scale
+end
+
+function MockCollider:setGravityScale(value)
+  assertions.is_number(value)
+
+  self.gravity_scale = value
+end
+
+-- MockCollider / Collision
+
+function MockCollider:getTag()
+  return self.tag
+end
+
+function MockCollider:setTag(tag)
+  assertions.is_string(tag)
+
+  self.tag = tag
+end
+
+-- MockCollider / Mass
+
+function MockCollider:getMass()
+  return self.mass
+end
+
+function MockCollider:getInertia()
+  return self.inertia_x, self.inertia_y, self.inertia_z, 0, 0, 1, 0
+end
+
+function MockCollider:getCenterOfMass()
+  return self.center_x, self.center_y, self.center_z
+end
+
+-- MockWorld
+
+local MockWorld = middleclass("MockWorld")
+
+function MockWorld:initialize()
+  self.raycast_results = {}
+  self.raycast_calls = {}
+end
+
+-- MockWorld / Queries
+
+function MockWorld:raycast(start_x, start_y, start_z, end_x, end_y, end_z, filter)
+  assertions.is_number(start_x)
+  assertions.is_number(start_y)
+  assertions.is_number(start_z)
+  assertions.is_number(end_x)
+  assertions.is_number(end_y)
+  assertions.is_number(end_z)
+  assertions.is_string(filter)
+
+  table.insert(self.raycast_calls, {
+    start_x, start_y, start_z,
+    end_x, end_y, end_z,
+    filter,
+  })
+
+  local result = self.raycast_results[#self.raycast_calls]
+  if not result then
+    return nil
+  end
+
+  return table.unpack(result, 1, 9)
+end
+
+-- MockCameraProvider
+
+local MockCameraProvider = middleclass("MockCameraProvider")
+
+function MockCameraProvider:initialize()
+  self.x, self.y, self.z = 1, 2, 3
+  self.position_call_count = 0
+end
+
+function MockCameraProvider:get_camera_position()
+  self.position_call_count = self.position_call_count + 1
+  return self.x, self.y, self.z
+end
+
+-- MockCameraProvider / Direction
+
+local MockDirectionCameraProvider = middleclass("MockDirectionCameraProvider", MockCameraProvider)
+
+function MockDirectionCameraProvider:initialize()
+  MockCameraProvider.initialize(self)
+
+  self.direction_x, self.direction_y, self.direction_z = 0, 0, -1
+  self.direction_call_count = 0
+end
+
+function MockDirectionCameraProvider:get_camera_direction()
+  self.direction_call_count = self.direction_call_count + 1
+  return self.direction_x, self.direction_y, self.direction_z
+end
+
+-- MockCameraProvider / Orientation
+
+local MockOrientationCameraProvider =
+  middleclass("MockOrientationCameraProvider", MockCameraProvider)
+
+function MockOrientationCameraProvider:initialize()
+  MockCameraProvider.initialize(self)
+
+  self.orientation = rotation.from_camera_direction(0, 0, -1)
+  self.orientation_call_count = 0
+end
+
+function MockOrientationCameraProvider:get_camera_orientation()
+  self.orientation_call_count = self.orientation_call_count + 1
+  return self.orientation
+end
+
+-- utility functions
+
+local function _hit(collider)
+  assertions.is_instance(collider, MockCollider)
+
+  return {collider, {}, 0, 0, 0, 0, 0, 1, 0}
+end
+
+local function _record_collider_changes()
+  local changes = {}
+  return changes, function(current_collider, previous_collider)
+    assertions.is_table_or_nil(current_collider)
+    assertions.is_table_or_nil(previous_collider)
+
+    table.insert(changes, { current = current_collider, previous = previous_collider })
+  end
+end
+
+-- luacheck: globals TestCarryController
+TestCarryController = {}
+
+-- TestCarryController / Constructor
+
+function TestCarryController.test_constructor_with_default_options()
+  local world = MockWorld:new()
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider)
+
+  luaunit.assert_equals(controller.world, world)
+  luaunit.assert_equals(controller.camera_provider, camera_provider)
+  luaunit.assert_equals(controller.interaction_distance, 2.5)
+  luaunit.assert_equals(controller.maximum_carry_mass, math.huge)
+  luaunit.assert_equals(controller.hold_distance, 1)
+  luaunit.assert_equals(controller.hold_offset_x, 0)
+  luaunit.assert_equals(controller.hold_offset_y, 0)
+  luaunit.assert_equals(controller.pull_speed, 6)
+  luaunit.assert_equals(controller.held_linear_damping, 0.8)
+  luaunit.assert_equals(controller.held_angular_damping, 0.95)
+  luaunit.assert_equals(controller.break_distance, 0.75)
+  luaunit.assert_equals(controller.break_duration, 0.25)
+  luaunit.assert_equals(controller.interaction_filter, "~player ~trigger ~held")
+  luaunit.assert_equals(controller.carryable_tag, "dynamic")
+  luaunit.assert_equals(controller.held_tag, "held")
+  luaunit.assert_equals(controller.pose_controller_options, {})
+  luaunit.assert_is_function(controller.on_held_collider_changed)
+  luaunit.assert_nil(controller.held_collider)
+  luaunit.assert_nil(controller.pose_controller)
+  luaunit.assert_nil(controller.held_original_tag)
+  luaunit.assert_nil(controller.held_original_linear_damping)
+  luaunit.assert_nil(controller.held_original_angular_damping)
+  luaunit.assert_nil(controller.held_original_gravity_scale)
+  luaunit.assert_nil(controller.current_hold_distance)
+  luaunit.assert_nil(controller.held_relative_orientation)
+  luaunit.assert_equals(controller.break_timer, 0)
+end
+
+function TestCarryController.test_constructor_with_custom_options()
+  local world = MockWorld:new()
+  local camera_provider = MockDirectionCameraProvider:new()
+  local pose_controller_options = { position_frequency = 2 }
+  local callback = function() end
+  local controller = CarryController:new(world, camera_provider, {
+    interaction_distance = 3,
+    maximum_carry_mass = 4,
+    hold_distance = 5, hold_offset_x = 6, hold_offset_y = 7,
+    pull_speed = 8,
+    held_linear_damping = 0.1, held_angular_damping = 0.2,
+    break_distance = 9, break_duration = 10,
+    interaction_filter = "solid", carryable_tag = "carryable", held_tag = "carried",
+    pose_controller_options = pose_controller_options,
+    on_held_collider_changed = callback,
+  })
+
+  luaunit.assert_equals(controller.world, world)
+  luaunit.assert_equals(controller.camera_provider, camera_provider)
+  luaunit.assert_equals(controller.interaction_distance, 3)
+  luaunit.assert_equals(controller.maximum_carry_mass, 4)
+  luaunit.assert_equals(controller.hold_distance, 5)
+  luaunit.assert_equals(controller.hold_offset_x, 6)
+  luaunit.assert_equals(controller.hold_offset_y, 7)
+  luaunit.assert_equals(controller.pull_speed, 8)
+  luaunit.assert_equals(controller.held_linear_damping, 0.1)
+  luaunit.assert_equals(controller.held_angular_damping, 0.2)
+  luaunit.assert_equals(controller.break_distance, 9)
+  luaunit.assert_equals(controller.break_duration, 10)
+  luaunit.assert_equals(controller.interaction_filter, "solid")
+  luaunit.assert_equals(controller.carryable_tag, "carryable")
+  luaunit.assert_equals(controller.held_tag, "carried")
+  luaunit.assert_equals(controller.pose_controller_options, pose_controller_options)
+  luaunit.assert_not_is(controller.pose_controller_options, pose_controller_options)
+  luaunit.assert_equals(controller.on_held_collider_changed, callback)
+  luaunit.assert_nil(controller.held_collider)
+  luaunit.assert_nil(controller.pose_controller)
+  luaunit.assert_nil(controller.held_original_tag)
+  luaunit.assert_nil(controller.held_original_linear_damping)
+  luaunit.assert_nil(controller.held_original_angular_damping)
+  luaunit.assert_nil(controller.held_original_gravity_scale)
+  luaunit.assert_nil(controller.current_hold_distance)
+  luaunit.assert_nil(controller.held_relative_orientation)
+  luaunit.assert_equals(controller.break_timer, 0)
+end
+
+-- TestCarryController / Acquisition and release
+
+function TestCarryController.test_acquire_holds_first_visible_carryable_collider()
+  local collider = MockCollider:new()
+  collider:setPosition(1.25, 2, 1.5)
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local changes, callback = _record_collider_changes()
+  local controller = CarryController:new(world, camera_provider, {
+    interaction_distance = 3,
+    maximum_carry_mass = 20,
+    held_linear_damping = 0.2, held_angular_damping = 0.3,
+    pose_controller_options = { position_frequency = 2 },
+    on_held_collider_changed = callback,
+  })
+
+  local is_held = controller:acquire()
+  luaunit.assert_true(is_held)
+
+  luaunit.assert_equals(world.raycast_calls, {{1, 2, 3, 1, 2, 0, "~player ~trigger ~held"}})
+  luaunit.assert_equals(collider.tag, "held")
+  luaunit.assert_equals(collider.linear_damping, 0.2)
+  luaunit.assert_equals(collider.angular_damping, 0.3)
+  luaunit.assert_equals(collider.gravity_scale, 0)
+  luaunit.assert_equals(changes, {{ current = collider }})
+  luaunit.assert_equals(controller.held_collider, collider)
+  luaunit.assert_equals(controller.pose_controller.collider, collider)
+  luaunit.assert_equals(controller.pose_controller.position_frequency, 2)
+  luaunit.assert_equals(controller.held_original_tag, "dynamic")
+  luaunit.assert_equals(controller.held_original_linear_damping, 0.05)
+  luaunit.assert_equals(controller.held_original_angular_damping, 0.1)
+  luaunit.assert_equals(controller.held_original_gravity_scale, 1)
+  luaunit.assert_almost_equals(controller.current_hold_distance, math.sqrt(2.3125), 1e-9)
+  luaunit.assert_equals(controller.held_relative_orientation, {1, 0, 0, 0})
+  luaunit.assert_equals(controller.break_timer, 0)
+end
+
+function TestCarryController.test_acquire_does_nothing_while_collider_is_held()
+  local collider = MockCollider:new()
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local changes, callback = _record_collider_changes()
+  local controller = CarryController:new(world, camera_provider, {
+    on_held_collider_changed = callback,
+  })
+
+  controller:acquire()
+
+  local is_held = controller:acquire()
+  luaunit.assert_true(is_held)
+
+  luaunit.assert_equals(#world.raycast_calls, 1)
+  luaunit.assert_equals(changes, {{ current = collider }})
+  luaunit.assert_equals(controller.held_collider, collider)
+end
+
+function TestCarryController.test_acquire_returns_false_when_raycast_misses()
+  local world = MockWorld:new()
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider)
+
+  local is_held = controller:acquire()
+  luaunit.assert_false(is_held)
+
+  luaunit.assert_equals(#world.raycast_calls, 1)
+  luaunit.assert_nil(controller.held_collider)
+  luaunit.assert_nil(controller.pose_controller)
+end
+
+function TestCarryController.test_acquire_rejects_non_carryable_occluder()
+  local collider = MockCollider:new()
+  collider.tag = "environment"
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider)
+
+  local is_held = controller:acquire()
+  luaunit.assert_false(is_held)
+
+  luaunit.assert_equals(collider.tag, "environment")
+  luaunit.assert_nil(controller.held_collider)
+  luaunit.assert_nil(controller.pose_controller)
+end
+
+function TestCarryController.test_acquire_rejects_collider_above_maximum_mass()
+  local collider = MockCollider:new()
+  collider.mass = 21
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider, { maximum_carry_mass = 20 })
+
+  local is_held = controller:acquire()
+  luaunit.assert_false(is_held)
+
+  luaunit.assert_equals(collider.tag, "dynamic")
+  luaunit.assert_equals(collider.linear_damping, 0.05)
+  luaunit.assert_equals(collider.angular_damping, 0.1)
+  luaunit.assert_equals(collider.gravity_scale, 1)
+  luaunit.assert_nil(controller.held_collider)
+  luaunit.assert_nil(controller.pose_controller)
+end
+
+function TestCarryController.test_release_restores_collider_and_clears_holding_state()
+  local collider = MockCollider:new()
+  collider.linear_damping, collider.angular_damping, collider.gravity_scale = 0.2, 0.3, 0.4
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local changes, callback = _record_collider_changes()
+  local controller = CarryController:new(world, camera_provider, {
+    on_held_collider_changed = callback,
+  })
+
+  controller:acquire()
+
+  controller.break_timer = 0.1
+  controller:release()
+
+  luaunit.assert_equals(collider.tag, "dynamic")
+  luaunit.assert_equals(collider.linear_damping, 0.2)
+  luaunit.assert_equals(collider.angular_damping, 0.3)
+  luaunit.assert_equals(collider.gravity_scale, 0.4)
+  luaunit.assert_equals(collider.linear_velocity_set_count, 0)
+  luaunit.assert_equals(collider.angular_velocity_set_count, 0)
+  luaunit.assert_equals(changes, {{ current = collider }, { previous = collider }})
+  luaunit.assert_nil(controller.held_collider)
+  luaunit.assert_nil(controller.pose_controller)
+  luaunit.assert_nil(controller.held_original_tag)
+  luaunit.assert_nil(controller.held_original_linear_damping)
+  luaunit.assert_nil(controller.held_original_angular_damping)
+  luaunit.assert_nil(controller.held_original_gravity_scale)
+  luaunit.assert_nil(controller.current_hold_distance)
+  luaunit.assert_nil(controller.held_relative_orientation)
+  luaunit.assert_equals(controller.break_timer, 0)
+end
+
+function TestCarryController.test_release_does_nothing_without_held_collider()
+  local world = MockWorld:new()
+  local camera_provider = MockDirectionCameraProvider:new()
+  local changes, callback = _record_collider_changes()
+  local controller = CarryController:new(world, camera_provider, {
+    on_held_collider_changed = callback,
+  })
+
+  controller:release()
+
+  luaunit.assert_equals(changes, {})
+  luaunit.assert_nil(controller.held_collider)
+end
+
+function TestCarryController.test_toggle_acquires_then_releases_collider()
+  local collider = MockCollider:new()
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider), _hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider)
+
+  luaunit.assert_true(controller:toggle())
+  luaunit.assert_equals(controller.held_collider, collider)
+
+  luaunit.assert_false(controller:toggle())
+  luaunit.assert_nil(controller.held_collider)
+
+  luaunit.assert_true(controller:toggle())
+  luaunit.assert_equals(controller.held_collider, collider)
+
+  luaunit.assert_false(controller:toggle())
+  luaunit.assert_nil(controller.held_collider)
+end
+
+-- TestCarryController / Pre-physics update
+
+function TestCarryController.test_pre_physics_update_does_nothing_without_held_collider()
+  local world = MockWorld:new()
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider)
+
+  controller:pre_physics_update(0.1)
+
+  luaunit.assert_equals(camera_provider.position_call_count, 0)
+  luaunit.assert_equals(camera_provider.direction_call_count, 0)
+end
+
+function TestCarryController.test_pre_physics_update_sets_camera_local_target_pose()
+  local collider = MockCollider:new()
+  collider:setPosition(2, 2, 3)
+  collider.angle, collider.axis_x, collider.axis_y, collider.axis_z = 0.4, 0, 1, 0
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockOrientationCameraProvider:new()
+  camera_provider.orientation = rotation.from_camera_direction(1, 0, 0)
+
+  local controller = CarryController:new(world, camera_provider, {
+    hold_distance = 1, hold_offset_x = 0.25, hold_offset_y = -0.5,
+  })
+
+  controller:acquire()
+
+  camera_provider.orientation = rotation.from_camera_direction(0, 0, -1)
+  controller:pre_physics_update(0.25)
+
+  luaunit.assert_equals(camera_provider.position_call_count, 2)
+  luaunit.assert_equals(camera_provider.orientation_call_count, 2)
+
+  luaunit.assert_almost_equals(controller.pose_controller.target_x, 1.25, 1e-9)
+  luaunit.assert_almost_equals(controller.pose_controller.target_y, 1.5, 1e-9)
+  luaunit.assert_almost_equals(controller.pose_controller.target_z, 2, 1e-9)
+
+  local angle, axis_x, axis_y, axis_z =
+    rotation.to_angle_axis(controller.pose_controller.target_orientation)
+  luaunit.assert_almost_equals(angle, math.pi / 2 + 0.4, 1e-9)
+  luaunit.assert_almost_equals(axis_x, 0, 1e-9)
+  luaunit.assert_almost_equals(axis_y, 1, 1e-9)
+  luaunit.assert_almost_equals(axis_z, 0, 1e-9)
+end
+
+function TestCarryController.test_pre_physics_update_uses_direction_camera_provider()
+  local collider = MockCollider:new()
+  collider:setPosition(1, 2, 2)
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider, { hold_distance = 0.75 })
+
+  controller:acquire()
+  controller:pre_physics_update(0.25)
+
+  luaunit.assert_true(collider.applied_force[3] > 0)
+  luaunit.assert_equals(camera_provider.direction_call_count, 2)
+  luaunit.assert_almost_equals(controller.pose_controller.target_x, 1, 1e-9)
+  luaunit.assert_almost_equals(controller.pose_controller.target_y, 2, 1e-9)
+  luaunit.assert_almost_equals(controller.pose_controller.target_z, 2.25, 1e-9)
+end
+
+function TestCarryController.test_pre_physics_update_limits_outward_pull_speed()
+  local collider = MockCollider:new()
+  collider:setPosition(1, 2, 2.5)
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider, {
+    hold_distance = 1,
+    pull_speed = 1,
+  })
+
+  controller:acquire()
+  controller:pre_physics_update(0.1)
+
+  luaunit.assert_almost_equals(controller.current_hold_distance, 0.6, 1e-9)
+  luaunit.assert_almost_equals(controller.pose_controller.target_z, 2.4, 1e-9)
+end
+
+function TestCarryController.test_pre_physics_update_limits_inward_pull_speed()
+  local collider = MockCollider:new()
+  collider:setPosition(1, 2, 1)
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider, {
+    hold_distance = 1,
+    pull_speed = 2,
+  })
+
+  controller:acquire()
+  controller:pre_physics_update(0.25)
+
+  luaunit.assert_almost_equals(controller.current_hold_distance, 1.5, 1e-9)
+  luaunit.assert_almost_equals(controller.pose_controller.target_z, 1.5, 1e-9)
+end
+
+-- TestCarryController / Post-physics update
+
+function TestCarryController.test_post_physics_update_does_nothing_without_held_collider()
+  local world = MockWorld:new()
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider)
+
+  controller:post_physics_update(0.1)
+
+  luaunit.assert_equals(controller.break_timer, 0)
+end
+
+function TestCarryController.test_post_physics_update_resets_timer_when_error_is_acceptable()
+  local collider = MockCollider:new()
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local controller = CarryController:new(world, camera_provider, { break_distance = 0.1 })
+
+  controller:acquire()
+
+  controller.break_timer = 0.2
+  controller:post_physics_update(0.1)
+
+  luaunit.assert_equals(controller.break_timer, 0)
+  luaunit.assert_equals(controller.held_collider, collider)
+end
+
+function TestCarryController.test_post_physics_update_releases_after_sustained_excessive_error()
+  local collider = MockCollider:new()
+  collider:setPosition(1, 2, 2)
+
+  local world = MockWorld:new()
+  world.raycast_results = {_hit(collider)}
+
+  local camera_provider = MockDirectionCameraProvider:new()
+  local changes, callback = _record_collider_changes()
+  local controller = CarryController:new(world, camera_provider, {
+    break_distance = 0.1, break_duration = 0.2,
+    on_held_collider_changed = callback,
+  })
+
+  controller:acquire()
+  controller:pre_physics_update(0.1)
+
+  collider.x = 2
+  controller:post_physics_update(0.1)
+  luaunit.assert_equals(controller.break_timer, 0.1)
+  luaunit.assert_equals(controller.held_collider, collider)
+
+  controller:post_physics_update(0.1)
+  luaunit.assert_equals(collider.tag, "dynamic")
+  luaunit.assert_equals(changes, {{ current = collider }, { previous = collider }})
+  luaunit.assert_nil(controller.held_collider)
+end

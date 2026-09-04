@@ -19,22 +19,14 @@
 local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
 local checks = require("luatypechecks.checks")
+local rotation = require("pkg.fpcontroller.utils.rotation")
+local vector = require("pkg.fpcontroller.utils.vector")
+local utils = require("pkg.fpcontroller.utils")
 
 local _CAPSULE_ANGLE, _CAPSULE_AXIS_X, _CAPSULE_AXIS_Y, _CAPSULE_AXIS_Z = math.pi / 2, 1, 0, 0
 local _MIN_VELOCITY_CORRECTION_TIME = 1 / 120
 local _MIN_PREDICTED_DISPLACEMENT = 1e-6 -- meters
 local _MIN_HORIZONTAL_NORMAL_LENGTH = 1e-6 -- dimensionless
-
-local function _shallow_copy(data)
-  assertions.is_table(data)
-
-  local data_shallow_copy = {}
-  for key, value in pairs(data) do
-    data_shallow_copy[key] = value
-  end
-
-  return data_shallow_copy
-end
 
 ---
 -- @table instance
@@ -49,6 +41,7 @@ end
 -- @tfield number eye_height eye height above capsule bottom
 -- @tfield number mass player mass in kilograms (**read-only**)
 -- @tfield number speed walking speed in meters per second
+-- @tfield number speed_scale multiplier applied to walking speed
 -- @tfield number max_acceleration maximum free walking acceleration in meters per second squared
 -- @tfield number max_push_force force limit against dynamic bodies while movement input is nonzero, in newtons
 -- @tfield number max_floor_angle maximum walkable floor angle
@@ -84,6 +77,7 @@ local FPController = middleclass("FPController")
 -- @tparam[opt=75] number options.mass player mass in kilograms
 -- @tparam[opt=0] number options.friction capsule friction
 -- @tparam[opt=2.5] number options.speed walking speed in meters per second
+-- @tparam[opt=1] number options.speed_scale multiplier applied to walking speed
 -- @tparam[opt=12] number options.max_acceleration maximum free walking acceleration in meters per second squared
 -- @tparam[opt=350] number options.max_push_force force limit against dynamic bodies while movement input is nonzero, in newtons
 -- @tparam[opt=math.rad(5)] number options.max_floor_angle maximum walkable floor angle
@@ -93,15 +87,15 @@ local FPController = middleclass("FPController")
 -- @tparam[opt=0.01] number options.contact_tolerance near-contact and step clearance tolerance
 -- @tparam[opt="player"] string options.tag collider tag
 -- @tparam[opt="dynamic"] string options.push_limit_filter push-limiting collision filter
--- @tparam[opt] string options.ground_filter groundedness query filter; excludes `options.tag` and "trigger" by default
+-- @tparam[opt] string options.ground_filter groundedness query filter; excludes `options.tag`, "trigger", and "held" by default
 -- @tparam[opt="environment"] string options.step_filter step-up collision filter
--- @tparam[opt] string options.obstruction_filter step-up obstruction query filter; excludes `options.tag` and "trigger" by default
+-- @tparam[opt] string options.obstruction_filter step-up obstruction query filter; excludes `options.tag`, "trigger", and "held" by default
 -- @treturn FPController
 function FPController:initialize(world, options)
   assertions.is_true(type(world) == "userdata" or checks.is_table(world))
   assertions.is_table_or_nil(options)
 
-  options = _shallow_copy(options or {})
+  options = utils.shallow_copy(options or {})
   options.x = options.x or 0
   options.y = options.y or 0
   options.z = options.z or 0
@@ -116,6 +110,7 @@ function FPController:initialize(world, options)
   options.mass = options.mass or 75
   options.friction = options.friction or 0
   options.speed = options.speed or 2.5
+  options.speed_scale = options.speed_scale or 1
   options.max_acceleration = options.max_acceleration or 12
   options.max_push_force = options.max_push_force or 350
   options.max_floor_angle = options.max_floor_angle or math.rad(5)
@@ -125,10 +120,10 @@ function FPController:initialize(world, options)
   options.contact_tolerance = options.contact_tolerance or 0.01
   options.tag = options.tag or "player"
   options.push_limit_filter = options.push_limit_filter or "dynamic"
-  options.ground_filter = options.ground_filter or string.format("~%s ~trigger", options.tag)
+  options.ground_filter = options.ground_filter or string.format("~%s ~trigger ~held", options.tag)
   options.step_filter = options.step_filter or "environment"
   options.obstruction_filter =
-    options.obstruction_filter or string.format("~%s ~trigger", options.tag)
+    options.obstruction_filter or string.format("~%s ~trigger ~held", options.tag)
 
   assertions.is_number(options.x)
   assertions.is_number(options.y)
@@ -144,6 +139,7 @@ function FPController:initialize(world, options)
   assertions.is_number(options.mass)
   assertions.is_number(options.friction)
   assertions.is_number(options.speed)
+  assertions.is_number(options.speed_scale)
   assertions.is_number(options.max_acceleration)
   assertions.is_number(options.max_push_force)
   assertions.is_number(options.max_floor_angle)
@@ -186,6 +182,7 @@ function FPController:initialize(world, options)
   self.eye_height = options.eye_height
   self.mass = options.mass
   self.speed = options.speed
+  self.speed_scale = options.speed_scale
   self.max_acceleration = options.max_acceleration
   self.max_push_force = options.max_push_force
   self.max_floor_angle = options.max_floor_angle
@@ -212,12 +209,19 @@ function FPController:get_camera_position()
 end
 
 ---
+-- @treturn table unit quaternion
+function FPController:get_camera_orientation()
+  local yaw_orientation = rotation.from_angle_and_axis(-self.yaw, 0, 1, 0)
+  local pitch_orientation = rotation.from_angle_and_axis(self.pitch, 1, 0, 0)
+  return rotation.multiply(yaw_orientation, pitch_orientation)
+end
+
+---
 -- @treturn number normalized view direction X component
 -- @treturn number normalized view direction Y component
 -- @treturn number normalized view direction Z component
 function FPController:get_camera_direction()
-  local cos_pitch = math.cos(self.pitch)
-  return math.sin(self.yaw) * cos_pitch, math.sin(self.pitch), -math.cos(self.yaw) * cos_pitch
+  return rotation.to_camera_direction(self:get_camera_orientation())
 end
 
 ---
@@ -273,11 +277,9 @@ function FPController:pre_physics_update(dt, input_x, input_z)
     end
   end
 
-  local input_length = math.sqrt(input_x * input_x + input_z * input_z)
   -- preserve analog input magnitude; only clamp vectors longer than one
-  if input_length > 1 then
-    input_x, input_z = input_x / input_length, input_z / input_length
-  end
+  local limited_input_x, _, limited_input_z = vector.limit_length(input_x, 0, input_z, 1)
+  input_x, input_z = limited_input_x, limited_input_z
 
   local sin_yaw, cos_yaw = math.sin(self.yaw), math.cos(self.yaw)
   local direction_x = input_x * cos_yaw - input_z * sin_yaw
@@ -286,7 +288,7 @@ function FPController:pre_physics_update(dt, input_x, input_z)
   local normalized_direction_x, normalized_direction_z
   local has_input = input_x ~= 0 or input_z ~= 0
   if has_input then
-    local direction_length = math.sqrt(direction_x * direction_x + direction_z * direction_z)
+    local direction_length = vector.length(direction_x, 0, direction_z)
     normalized_direction_x = direction_x / direction_length
     normalized_direction_z = direction_z / direction_length
   end
@@ -351,17 +353,17 @@ function FPController:_calculate_horizontal_force(dt, direction_x, direction_z, 
   assertions.is_number(direction_z)
   assertions.is_boolean(has_input)
 
-  local desired_velocity_x, desired_velocity_z = direction_x * self.speed, direction_z * self.speed
+  local effective_speed = self.speed * self.speed_scale
+  local desired_velocity_x, desired_velocity_z =
+    direction_x * effective_speed, direction_z * effective_speed
   local velocity_x, _, velocity_z = self.collider:getLinearVelocity()
   local velocity_correction_time = math.max(dt, _MIN_VELOCITY_CORRECTION_TIME)
   local force_x = (desired_velocity_x - velocity_x) * self.mass / velocity_correction_time
   local force_z = (desired_velocity_z - velocity_z) * self.mass / velocity_correction_time
-  local force_length = math.sqrt(force_x * force_x + force_z * force_z)
   local maximum_force = self.mass * self.max_acceleration
-  if force_length > maximum_force then
-    force_x = force_x / force_length * maximum_force
-    force_z = force_z / force_length * maximum_force
-  end
+  local limited_force_x, _, limited_force_z =
+    vector.limit_length(force_x, 0, force_z, maximum_force)
+  force_x, force_z = limited_force_x, limited_force_z
 
   if not has_input then
     return force_x, force_z
@@ -381,10 +383,8 @@ function FPController:_limit_push_force(dt, velocity_x, velocity_z, force_x, for
   local predicted_velocity_z = velocity_z + force_z / self.mass * dt
   local predicted_displacement_x = predicted_velocity_x * dt
   local predicted_displacement_z = predicted_velocity_z * dt
-  local predicted_displacement_length = math.sqrt(
-    predicted_displacement_x * predicted_displacement_x
-      + predicted_displacement_z * predicted_displacement_z
-  )
+  local predicted_displacement_length =
+    vector.length(predicted_displacement_x, 0, predicted_displacement_z)
   if predicted_displacement_length <= _MIN_PREDICTED_DISPLACEMENT then
     return force_x, force_z
   end
@@ -400,7 +400,7 @@ function FPController:_limit_push_force(dt, velocity_x, velocity_z, force_x, for
     return force_x, force_z
   end
 
-  local horizontal_normal_length = math.sqrt(normal_x * normal_x + normal_z * normal_z)
+  local horizontal_normal_length = vector.length(normal_x, 0, normal_z)
   if horizontal_normal_length <= _MIN_HORIZONTAL_NORMAL_LENGTH then
     return force_x, force_z
   end

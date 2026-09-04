@@ -5,7 +5,13 @@ file = {
   "models/floorsection.lua",
   "models/room.lua",
   "models/wall.lua",
-  "pkg/fpcontroller/init.lua",
+  "pkg/fpcontroller/utils/init.lua",
+  "pkg/fpcontroller/utils/vector.lua",
+  "pkg/fpcontroller/utils/rotation.lua",
+  "pkg/fpcontroller/utils/collider.lua",
+  "pkg/fpcontroller/fpcontroller.lua",
+  "pkg/fpcontroller/posecontroller.lua",
+  "pkg/fpcontroller/carrycontroller.lua",
 }
 topics = {
   "README.md",

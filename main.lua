@@ -7,7 +7,8 @@ local BaseShading = require("lovr-base-shading")
 local FloorSection = require("models.floorsection")
 local Room = require("models.room")
 local Wall = require("models.wall")
-local FPController = require("pkg.fpcontroller")
+local FPController = require("pkg.fpcontroller.fpcontroller")
+local CarryController = require("pkg.fpcontroller.carrycontroller")
 
 local PLAYER_HEIGHT = 1.8
 local PLAYER_START_BOTTOM_Y = 5
@@ -39,6 +40,10 @@ local WALL_FRICTION = 0.8
 local CUBE_SIZE = 0.5
 local CUBE_MASS = 20
 local CUBE_FRICTION = 0.6
+local MAXIMUM_CARRY_MASS = 40
+local CARRY_MASS_AT_MINIMUM_SPEED = 20
+local MINIMUM_CARRY_SPEED_SCALE = 0.5
+local MAXIMUM_CARRY_SPEED_LOSS = 1 - MINIMUM_CARRY_SPEED_SCALE
 local CUBE_SPAWN_HEIGHT = UPPER_ROOM_HEIGHT + WALL_HEIGHT
 local CUBE_SPAWN_AREA_SIZE = 1.5
 local CUBE_SPAWN_INTERVAL = 0.375
@@ -67,7 +72,9 @@ local is_flashlight_enabled = true
 local shadow = BaseShading.newShadow({ bias = 0.0001 }) -- BaseShadow
 local physics_world = nil -- World
 local player_controller = nil -- FPController
+local carry_controller = nil -- CarryController
 local cube_colliders = {} -- {Collider,...}
+local persistent_cube_colliders = {} -- {[Collider]=boolean,...}
 local cube_spawn_timer = 0
 local floor_sections = {} -- {FloorSection,...}
 local floor_section_materials = {} -- {Material,...}
@@ -104,9 +111,9 @@ end
 local function _set_random_orientation(collider)
   assertions.is_true(type(collider) == "userdata")
 
-  local x_angle = 2 * math.pi * lovr.math.random()
-  local y_angle = 2 * math.pi * lovr.math.random()
-  local z_angle = 2 * math.pi * lovr.math.random()
+  local x_angle = (2 * math.pi) * lovr.math.random()
+  local y_angle = (2 * math.pi) * lovr.math.random()
+  local z_angle = (2 * math.pi) * lovr.math.random()
   collider:setOrientation(quaternion.euler(x_angle, y_angle, z_angle))
 end
 
@@ -127,8 +134,17 @@ end
 
 local function _spawn_cube()
   if #cube_colliders >= MAX_CUBE_COUNT then
-    local oldest_cube_collider = table.remove(cube_colliders, 1)
-    oldest_cube_collider:destroy()
+    local oldest_cube_collider_index = nil
+    for index, cube_collider in ipairs(cube_colliders) do
+      if not persistent_cube_colliders[cube_collider] then
+        oldest_cube_collider_index = index
+        break
+      end
+    end
+    if oldest_cube_collider_index ~= nil then
+      local oldest_cube_collider = table.remove(cube_colliders, oldest_cube_collider_index)
+      oldest_cube_collider:destroy()
+    end
   end
 
   local half_spawn_area_size = CUBE_SPAWN_AREA_SIZE / 2
@@ -237,6 +253,18 @@ local function _add_stairs()
   end
 end
 
+local function _on_held_collider_changed(current_collider)
+  if current_collider == nil then
+    player_controller.speed_scale = 1
+    return
+  end
+
+  persistent_cube_colliders[current_collider] = true
+
+  local load_ratio = math.min(current_collider:getMass() / CARRY_MASS_AT_MINIMUM_SPEED, 1)
+  player_controller.speed_scale = 1 - load_ratio * MAXIMUM_CARRY_SPEED_LOSS
+end
+
 function lovr.load()
   lovr.system.setWindowFullscreen(is_fullscreen)
   _set_mouse_captured(true)
@@ -321,9 +349,10 @@ function lovr.load()
   lights[FLASHLIGHT_FILL_LIGHT_INDEX].quadraticAttenuation = 0.5
 
   physics_world = lovr.physics.newWorld({
-    tags = {"player", "dynamic", "environment", "trigger"},
+    tags = {"player", "dynamic", "held", "environment", "trigger"},
     staticTags = {"environment"},
   })
+  physics_world:disableCollisionBetween("player", "held")
 
   _add_room(Room:new(LOWER_ROOM_Z, 0, "positive"))
   _add_room(Room:new(UPPER_ROOM_Z, UPPER_ROOM_HEIGHT, "negative"))
@@ -335,6 +364,11 @@ function lovr.load()
     speed = PLAYER_SPEED,
     -- add a margin to the exact stair height for physics contact imprecision
     max_step_height = STAIR_STEP_HEIGHT + 0.02,
+  })
+  carry_controller = CarryController:new(physics_world, player_controller, {
+    maximum_carry_mass = MAXIMUM_CARRY_MASS,
+    hold_offset_y = -0.2,
+    on_held_collider_changed = _on_held_collider_changed,
   })
 
   _spawn_cube()
@@ -517,8 +551,10 @@ function lovr.update(dt)
   -- affect the current frame rather than the next one
   local input_x, input_z = _get_normalized_input()
   player_controller:pre_physics_update(dt, input_x, input_z)
+  carry_controller:pre_physics_update(dt)
 
   physics_world:update(dt)
+  carry_controller:post_physics_update(dt)
 
   cube_spawn_timer = cube_spawn_timer + dt
   if cube_spawn_timer >= CUBE_SPAWN_INTERVAL then
@@ -536,11 +572,16 @@ end
 function lovr.keypressed(key)
   assertions.is_string(key)
 
+  if key == "e" then
+    carry_controller:toggle()
+  end
+
   if key == "f" then
     is_flashlight_enabled = not is_flashlight_enabled
   end
 
   if key == "r" then
+    carry_controller:release()
     player_controller:teleport(0, PLAYER_START_Y, LOWER_ROOM_Z)
   end
 

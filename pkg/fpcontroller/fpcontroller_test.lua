@@ -1,9 +1,12 @@
 local luaunit = require("luaunit")
 local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
-local FPController = require("pkg.fpcontroller")
-
-local unpack = table.unpack or unpack
+local FPController = require("pkg.fpcontroller.fpcontroller")
+local rotation = require("pkg.fpcontroller.utils.rotation")
+local _ENV = require("compat53.module")
+if _VERSION == "Lua 5.1" then
+  setfenv(1, _ENV)
+end
 
 -- MockMatrix
 
@@ -95,7 +98,7 @@ function MockCollider:setContinuous(value)
   self.continuous = value
 end
 
-function MockCollider:setDegreesOfFreedom(translation, rotation)
+function MockCollider:setDegreesOfFreedom(translation, rotation) -- luacheck: no redefined
   assertions.is_string(translation)
   assertions.is_string(rotation)
 
@@ -178,7 +181,7 @@ function MockWorld:raycast(start_x, start_y, start_z, end_x, end_y, end_z, filte
     return nil
   end
 
-  return unpack(result, 1, 9)
+  return table.unpack(result, 1, 9)
 end
 
 function MockWorld:shapecast(
@@ -214,7 +217,7 @@ function MockWorld:shapecast(
     return nil
   end
 
-  return unpack(result, 1, 10)
+  return table.unpack(result, 1, 10)
 end
 
 function MockWorld:overlapShape(
@@ -346,7 +349,10 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_false(collider.sleeping_allowed)
   luaunit.assert_equals(collider.degrees_of_freedom, {"xyz", ""})
 
-  luaunit.assert_equals({unpack(world.new_capsule_collider_arguments, 1, 4)}, {0, 0, 0, 0.3})
+  luaunit.assert_equals(
+    {table.unpack(world.new_capsule_collider_arguments, 1, 4)},
+    {0, 0, 0, 0.3}
+  )
   luaunit.assert_almost_equals(world.new_capsule_collider_arguments[5], 1.2)
 
   luaunit.assert_equals(controller.world, world)
@@ -360,6 +366,7 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_equals(controller.eye_height, 1.65)
   luaunit.assert_equals(controller.mass, 75)
   luaunit.assert_equals(controller.speed, 2.5)
+  luaunit.assert_equals(controller.speed_scale, 1)
   luaunit.assert_equals(controller.max_acceleration, 12)
   luaunit.assert_equals(controller.max_push_force, 350)
   luaunit.assert_almost_equals(controller.max_floor_angle, math.rad(5))
@@ -368,9 +375,9 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_equals(controller.ground_tolerance, 0.08)
   luaunit.assert_equals(controller.contact_tolerance, 0.01)
   luaunit.assert_equals(controller.push_limit_filter, "dynamic")
-  luaunit.assert_equals(controller.ground_filter, "~player ~trigger")
+  luaunit.assert_equals(controller.ground_filter, "~player ~trigger ~held")
   luaunit.assert_equals(controller.step_filter, "environment")
-  luaunit.assert_equals(controller.obstruction_filter, "~player ~trigger")
+  luaunit.assert_equals(controller.obstruction_filter, "~player ~trigger ~held")
   luaunit.assert_equals(controller.collider, collider)
   luaunit.assert_nil(controller.ground_collider)
   luaunit.assert_nil(controller.ground_shape)
@@ -385,7 +392,7 @@ function TestFPController.test_constructor_with_custom_options()
     mouse_sensitivity = 0.01, mouse_y_inverted = true,
     radius = 0.25, height = 1.75, eye_height = 1.4,
     mass = 80, friction = 0.2,
-    speed = 4, max_acceleration = 20, max_push_force = 100,
+    speed = 4, speed_scale = 0.25, max_acceleration = 20, max_push_force = 100,
     max_floor_angle = 0.2,
     max_step_height = 0.3, step_search_distance = 0.1,
     ground_tolerance = 0.04, contact_tolerance = 0.005,
@@ -408,7 +415,10 @@ function TestFPController.test_constructor_with_custom_options()
   luaunit.assert_false(collider.sleeping_allowed)
   luaunit.assert_equals(collider.degrees_of_freedom, {"xyz", ""})
 
-  luaunit.assert_equals({unpack(world.new_capsule_collider_arguments, 1, 4)}, {1, 2, 3, 0.25})
+  luaunit.assert_equals(
+    {table.unpack(world.new_capsule_collider_arguments, 1, 4)},
+    {1, 2, 3, 0.25}
+  )
   luaunit.assert_almost_equals(world.new_capsule_collider_arguments[5], 1.25)
 
   luaunit.assert_equals(controller.world, world)
@@ -422,6 +432,7 @@ function TestFPController.test_constructor_with_custom_options()
   luaunit.assert_equals(controller.eye_height, 1.4)
   luaunit.assert_equals(controller.mass, 80)
   luaunit.assert_equals(controller.speed, 4)
+  luaunit.assert_equals(controller.speed_scale, 0.25)
   luaunit.assert_equals(controller.max_acceleration, 20)
   luaunit.assert_equals(controller.max_push_force, 100)
   luaunit.assert_equals(controller.max_floor_angle, 0.2)
@@ -451,6 +462,20 @@ function TestFPController.test_get_camera_position()
   luaunit.assert_equals(x, 4)
   luaunit.assert_almost_equals(y, 5.6, 1e-9)
   luaunit.assert_equals(z, 6)
+end
+
+function TestFPController.test_get_camera_orientation()
+  local world = MockWorld:new(MockCollider:new())
+  local controller = FPController:new(world, {
+    yaw = math.pi / 2, pitch = math.pi / 6,
+  })
+  local orientation = controller:get_camera_orientation()
+
+  local x, y, z = rotation.rotate_vector(orientation, 0, 0, -1)
+
+  luaunit.assert_almost_equals(x, math.cos(math.pi / 6), 1e-9)
+  luaunit.assert_almost_equals(y, 0.5, 1e-9)
+  luaunit.assert_almost_equals(z, 0, 1e-9)
 end
 
 function TestFPController.test_get_camera_direction()
@@ -673,6 +698,21 @@ function TestFPController.test_near_ground_controller_can_move_but_does_not_step
   luaunit.assert_almost_equals(world.raycast_calls[2][5], -1.16, 1e-9)
 end
 
+function TestFPController.test_speed_scale_changes_desired_walking_speed()
+  local collider = MockCollider:new()
+  local world = MockWorld:new(collider)
+  world.raycast_results = {_ground_hit()}
+
+  local controller = FPController:new(world, {
+    mass = 10,
+    speed = 4, speed_scale = 0.5, max_acceleration = 100,
+  })
+
+  controller:pre_physics_update(1, 0, -1)
+
+  luaunit.assert_almost_equals(collider.force_z, -20, 1e-9)
+end
+
 -- TestFPController / Dynamic-body push limiting
 
 function TestFPController.test_walking_shapecasts_predicted_displacement_for_dynamic_bodies()
@@ -695,11 +735,11 @@ function TestFPController.test_walking_shapecasts_predicted_displacement_for_dyn
 
   local arguments = world.shapecast_calls[1]
   luaunit.assert_equals(arguments[1], collider.shape)
-  luaunit.assert_equals({unpack(arguments, 2, 4)}, {1, 2, 3})
+  luaunit.assert_equals({table.unpack(arguments, 2, 4)}, {1, 2, 3})
   luaunit.assert_almost_equals(arguments[5], 1, 1e-9)
   luaunit.assert_equals(arguments[6], 2)
   luaunit.assert_almost_equals(arguments[7], 0.9, 1e-9)
-  luaunit.assert_equals({unpack(arguments, 8, 11)}, {math.pi / 2, 1, 0, 0})
+  luaunit.assert_equals({table.unpack(arguments, 8, 11)}, {math.pi / 2, 1, 0, 0})
   luaunit.assert_equals(arguments[12], "pushable")
 end
 
