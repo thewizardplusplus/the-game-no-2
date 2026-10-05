@@ -1,25 +1,27 @@
 local luaunit = require("luaunit")
-local vector = require("pkg.fpcontroller.utils.vector")
+local vectorutils = require("pkg.fpcontroller.utils.vector")
 
 -- luacheck: globals TestVector
 TestVector = {}
 
-function TestVector.test_length()
-  luaunit.assert_equals(vector.length(2, -3, 6), 7)
-end
-
 function TestVector.test_limit_length_scales_long_vector()
-  local x, y, z = vector.limit_length(2, -3, 6, 3.5)
+  local value = vector(2, -3, 6)
+  local limited_value = vectorutils.limit_length(value, 3.5)
 
-  luaunit.assert_almost_equals(x, 1, 1e-9)
-  luaunit.assert_almost_equals(y, -1.5, 1e-9)
-  luaunit.assert_almost_equals(z, 3, 1e-9)
+  luaunit.assert_almost_equals(limited_value.x, 1, 1e-9)
+  luaunit.assert_almost_equals(limited_value.y, -1.5, 1e-9)
+  luaunit.assert_almost_equals(limited_value.z, 3, 1e-9)
+  luaunit.assert_equals(value, vector(2, -3, 6))
 end
 
 function TestVector.test_limit_length_preserves_short_vector()
-  luaunit.assert_equals({vector.limit_length(1, 2, 2, 4)}, {1, 2, 2})
+  local value = vector(1, 2, 2)
+
+  luaunit.assert_is(vectorutils.limit_length(value, 4), value)
 end
 
 function TestVector.test_limit_length_preserves_zero_vector()
-  luaunit.assert_equals({vector.limit_length(0, 0, 0, 1)}, {0, 0, 0})
+  local value = vector.zero
+
+  luaunit.assert_is(vectorutils.limit_length(value, 1), value)
 end

@@ -15,6 +15,7 @@ local PLAYER_START_BOTTOM_Y = 5
 local PLAYER_START_Y = PLAYER_START_BOTTOM_Y + PLAYER_HEIGHT / 2
 local PLAYER_SPEED = 1.7
 local MOON_LIGHT_INDEX = 1
+local MOON_DIRECTION = vector(0.321, 0.767, 0.555):normalize()
 local MOON_SHADOW_DISTANCE = 15
 local MOON_SHADOW_ORTHOGRAPHIC_SIZE = 7
 local FLASHLIGHT_LIGHT_INDEX = 2
@@ -66,7 +67,7 @@ local stair_wall_material = nil -- Material
 local wall_shading_material = nil -- BaseMaterial
 local base_shading = nil -- BaseShading
 local surface_shader = nil -- Shader
-local ambient = nil -- Vec4
+local ambient = nil -- {number,number,number,number}
 local lights = {} -- {BaseLight,...}
 local is_flashlight_enabled = true
 local shadow = BaseShading.newShadow({ bias = 0.0001 }) -- BaseShadow
@@ -105,7 +106,7 @@ local function _new_linear_color(red, green, blue)
   assertions.is_number(blue)
 
   red, green, blue = lovr.math.gammaToLinear(red, green, blue)
-  return lovr.math.newVec4(red, green, blue, 1)
+  return {red, green, blue, 1}
 end
 
 local function _set_random_orientation(collider)
@@ -151,8 +152,8 @@ local function _spawn_cube()
   local cube_x = (2 * lovr.math.random() - 1) * half_spawn_area_size
   local cube_z = UPPER_ROOM_Z + (2 * lovr.math.random() - 1) * half_spawn_area_size
   local cube_collider = physics_world:newBoxCollider(
-    cube_x, CUBE_SPAWN_HEIGHT, cube_z,
-    CUBE_SIZE, CUBE_SIZE, CUBE_SIZE
+    vector(cube_x, CUBE_SPAWN_HEIGHT, cube_z),
+    vector(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE)
   )
   cube_collider:setTag("dynamic")
   cube_collider:setMass(CUBE_MASS)
@@ -166,15 +167,10 @@ local function _add_floor_section(section)
   assertions.is_instance(section, FloorSection)
 
   table.insert(floor_sections, section)
-  table.insert(
-    floor_section_materials,
-    _get_concrete_material(section.width / section.thickness, 1)
-  )
+  table.insert(floor_section_materials, _get_concrete_material(section.size.x / section.size.y, 1))
 
-  local collider = physics_world:newBoxCollider(
-    section.x, section.top_y - section.thickness / 2, section.z,
-    section.width, section.thickness, section.depth
-  )
+  local collider_position = section.position - vector(0, section.size.y / 2, 0)
+  local collider = physics_world:newBoxCollider(collider_position, section.size)
   collider:setTag("environment")
   collider:setFriction(FLOOR_FRICTION)
 end
@@ -183,15 +179,10 @@ local function _add_wall(wall)
   assertions.is_instance(wall, Wall)
 
   table.insert(walls, wall)
-  table.insert(
-    wall_materials,
-    _get_concrete_material(1, wall.height / wall.thickness)
-  )
+  table.insert(wall_materials, _get_concrete_material(1, wall.size.y / wall.size.z))
 
-  local collider = physics_world:newBoxCollider(
-    wall.x, wall.center_y, wall.z,
-    wall.box_width, wall.height, wall.box_depth
-  )
+  local collider = physics_world:newBoxCollider(wall.position, wall.size)
+  collider:setOrientation(wall.orientation)
   collider:setTag("environment")
   collider:setFriction(WALL_FRICTION)
 end
@@ -200,29 +191,29 @@ local function _add_room(room)
   assertions.is_instance(room, Room)
 
   _add_floor_section(FloorSection:new(
-    0, room.floor_height, room.center_z,
-    FLOOR_SIZE, FLOOR_THICKNESS, FLOOR_SIZE,
+    room.floor_position,
+    vector(FLOOR_SIZE, FLOOR_THICKNESS, FLOOR_SIZE),
     "room"
   ))
 
   local half_floor_size = FLOOR_SIZE / 2
   _add_wall(Wall:new(
-    -half_floor_size, room.floor_height, room.center_z,
-    FLOOR_SIZE, WALL_HEIGHT, WALL_COLLIDER_THICKNESS,
+    room.floor_position + vector(-half_floor_size, 0, 0),
+    vector(FLOOR_SIZE, WALL_HEIGHT, WALL_COLLIDER_THICKNESS),
     "left",
     "room"
   ))
   _add_wall(Wall:new(
-    half_floor_size, room.floor_height, room.center_z,
-    FLOOR_SIZE, WALL_HEIGHT, WALL_COLLIDER_THICKNESS,
+    room.floor_position + vector(half_floor_size, 0, 0),
+    vector(FLOOR_SIZE, WALL_HEIGHT, WALL_COLLIDER_THICKNESS),
     "right",
     "room"
   ))
 
   local front_wall_offset = room.open_side == "positive" and -half_floor_size or half_floor_size
   _add_wall(Wall:new(
-    0, room.floor_height, room.center_z + front_wall_offset,
-    FLOOR_SIZE, WALL_HEIGHT, WALL_COLLIDER_THICKNESS,
+    room.floor_position + vector(0, 0, front_wall_offset),
+    vector(FLOOR_SIZE, WALL_HEIGHT, WALL_COLLIDER_THICKNESS),
     "front",
     "room"
   ))
@@ -234,19 +225,19 @@ local function _add_stairs()
     local step_y = index * STAIR_STEP_HEIGHT
     local step_z = -STAIR_LENGTH / 2 + (index - 0.5) * STAIR_STEP_DEPTH
     _add_floor_section(FloorSection:new(
-      0, step_y, step_z,
-      FLOOR_SIZE, STAIR_STEP_HEIGHT, STAIR_STEP_DEPTH,
+      vector(0, step_y, step_z),
+      vector(FLOOR_SIZE, STAIR_STEP_HEIGHT, STAIR_STEP_DEPTH),
       "stair"
     ))
     _add_wall(Wall:new(
-      -half_floor_size, step_y, step_z,
-      STAIR_STEP_DEPTH, WALL_HEIGHT, WALL_COLLIDER_THICKNESS,
+      vector(-half_floor_size, step_y, step_z),
+      vector(STAIR_STEP_DEPTH, WALL_HEIGHT, WALL_COLLIDER_THICKNESS),
       "left",
       "stair"
     ))
     _add_wall(Wall:new(
-      half_floor_size, step_y, step_z,
-      STAIR_STEP_DEPTH, WALL_HEIGHT, WALL_COLLIDER_THICKNESS,
+      vector(half_floor_size, step_y, step_z),
+      vector(STAIR_STEP_DEPTH, WALL_HEIGHT, WALL_COLLIDER_THICKNESS),
       "right",
       "stair"
     ))
@@ -274,17 +265,17 @@ function lovr.load()
   local cube_texture = lovr.graphics.newTexture("resources/textures/cube/cube.png")
   cube_material = lovr.graphics.newMaterial({ texture = cube_texture })
   cube_shading_material = BaseShading.newMaterial({
-    ambient = lovr.math.newVec4(0.25, 0.25, 0.25, 1),
-    diffuse = lovr.math.newVec4(0.8, 0.8, 0.8, 1),
-    specular = lovr.math.newVec4(0.08, 0.08, 0.08, 1),
+    ambient = {0.25, 0.25, 0.25, 1},
+    diffuse = {0.8, 0.8, 0.8, 1},
+    specular = {0.08, 0.08, 0.08, 1},
     shininess = 8,
   })
 
   concrete_texture = lovr.graphics.newTexture("resources/textures/concrete/concrete.png")
   concrete_shading_material = BaseShading.newMaterial({
-    ambient = lovr.math.newVec4(0.25, 0.25, 0.25, 1),
-    diffuse = lovr.math.newVec4(0.75, 0.75, 0.75, 1),
-    specular = lovr.math.newVec4(0.1, 0.1, 0.1, 1),
+    ambient = {0.25, 0.25, 0.25, 1},
+    diffuse = {0.75, 0.75, 0.75, 1},
+    specular = {0.1, 0.1, 0.1, 1},
     shininess = 12,
   })
 
@@ -295,9 +286,9 @@ function lovr.load()
     uvScale = {5, STAIR_STEP_DEPTH},
   })
   floor_shading_material = BaseShading.newMaterial({
-    ambient = lovr.math.newVec4(0.3, 0.3, 0.3, 1),
-    diffuse = lovr.math.newVec4(0.9, 0.9, 0.9, 1),
-    specular = lovr.math.newVec4(0.45, 0.45, 0.45, 1),
+    ambient = {0.3, 0.3, 0.3, 1},
+    diffuse = {0.9, 0.9, 0.9, 1},
+    specular = {0.45, 0.45, 0.45, 1},
     shininess = 48,
   })
 
@@ -308,9 +299,9 @@ function lovr.load()
     uvScale = {4 * STAIR_STEP_DEPTH / FLOOR_SIZE, 1},
   })
   wall_shading_material = BaseShading.newMaterial({
-    ambient = lovr.math.newVec4(0.25, 0.25, 0.25, 1),
-    diffuse = lovr.math.newVec4(0.85, 0.85, 0.85, 1),
-    specular = lovr.math.newVec4(0.1, 0.1, 0.1, 1),
+    ambient = {0.25, 0.25, 0.25, 1},
+    diffuse = {0.85, 0.85, 0.85, 1},
+    specular = {0.1, 0.1, 0.1, 1},
     shininess = 12,
   })
 
@@ -325,18 +316,16 @@ function lovr.load()
     table.insert(lights, BaseShading.newLight())
   end
 
-  local moon_direction = lovr.math.newVec3(0.321, 0.767, 0.555):normalize()
-  local moon_x, moon_y, moon_z = moon_direction:unpack()
   lights[MOON_LIGHT_INDEX].mode = BaseShading.LightMode.kFragment
-  lights[MOON_LIGHT_INDEX].position = lovr.math.newVec4(moon_x, moon_y, moon_z, 0)
+  lights[MOON_LIGHT_INDEX].position = {MOON_DIRECTION.x, MOON_DIRECTION.y, MOON_DIRECTION.z, 0}
   lights[MOON_LIGHT_INDEX].diffuse = _new_linear_color(0.5, 0.494, 0.479)
   lights[MOON_LIGHT_INDEX].specular = _new_linear_color(0.5, 0.494, 0.479)
 
   lights[FLASHLIGHT_LIGHT_INDEX].mode = BaseShading.LightMode.kFragment
   lights[FLASHLIGHT_LIGHT_INDEX].spotCutoff = 35
   lights[FLASHLIGHT_LIGHT_INDEX].spotExponent = 2
-  lights[FLASHLIGHT_LIGHT_INDEX].diffuse = lovr.math.newVec4(1, 1, 1, 1)
-  lights[FLASHLIGHT_LIGHT_INDEX].specular = lovr.math.newVec4(1, 1, 1, 1)
+  lights[FLASHLIGHT_LIGHT_INDEX].diffuse = {1, 1, 1, 1}
+  lights[FLASHLIGHT_LIGHT_INDEX].specular = {1, 1, 1, 1}
 
   lights[FLASHLIGHT_WIDE_LIGHT_INDEX].mode = BaseShading.LightMode.kFragment
   lights[FLASHLIGHT_WIDE_LIGHT_INDEX].spotCutoff = 42.5
@@ -354,12 +343,12 @@ function lovr.load()
   })
   physics_world:disableCollisionBetween("player", "held")
 
-  _add_room(Room:new(LOWER_ROOM_Z, 0, "positive"))
-  _add_room(Room:new(UPPER_ROOM_Z, UPPER_ROOM_HEIGHT, "negative"))
+  _add_room(Room:new(vector(0, 0, LOWER_ROOM_Z), "positive"))
+  _add_room(Room:new(vector(0, UPPER_ROOM_HEIGHT, UPPER_ROOM_Z), "negative"))
   _add_stairs()
 
   player_controller = FPController:new(physics_world, {
-    x = 0, y = PLAYER_START_Y, z = LOWER_ROOM_Z,
+    position = vector(0, PLAYER_START_Y, LOWER_ROOM_Z),
     height = PLAYER_HEIGHT,
     speed = PLAYER_SPEED,
     -- add a margin to the exact stair height for physics contact imprecision
@@ -367,7 +356,7 @@ function lovr.load()
   })
   carry_controller = CarryController:new(physics_world, player_controller, {
     maximum_carry_mass = MAXIMUM_CARRY_MASS,
-    hold_offset_y = -0.2,
+    hold_offset = vector(0, -0.2, -1),
     on_held_collider_changed = _on_held_collider_changed,
   })
 
@@ -378,27 +367,26 @@ function lovr.draw(pass)
   assertions.is_true(type(pass) == "userdata")
 
   -- a pass snapshots the current camera for every draw, so set it before recording scene draws
-  pass:setViewPose(1, player_controller:get_camera_view_pose(), true)
+  local camera_position = player_controller:get_camera_position()
+  local camera_orientation = player_controller:get_camera_orientation()
+  pass:setViewPose(1, camera_position, camera_orientation)
 
   pass:skybox(skybox_texture)
 
-  local camera_x, camera_y, camera_z = player_controller:get_camera_position()
-  local camera_direction_x, camera_direction_y, camera_direction_z =
-    player_controller:get_camera_direction()
-  local camera_direction =
-    lovr.math.newVec3(camera_direction_x, camera_direction_y, camera_direction_z)
-  local camera_right = lovr.math.newVec3(-camera_direction_z, 0, camera_direction_x):normalize()
-  local camera_right_x, _, camera_right_z = camera_right:unpack()
-  lights[FLASHLIGHT_LIGHT_INDEX].spotDirection = camera_direction
-  lights[FLASHLIGHT_LIGHT_INDEX].position = lovr.math.newVec4(
-    camera_x + camera_right_x * FLASHLIGHT_RIGHT_OFFSET,
-    camera_y - FLASHLIGHT_DOWN_OFFSET,
-    camera_z + camera_right_z * FLASHLIGHT_RIGHT_OFFSET,
-    1
+  local camera_right = camera_orientation * vector.right
+  local flashlight_direction = camera_orientation:direction()
+  local flashlight_position = vector(
+    camera_position.x + camera_right.x * FLASHLIGHT_RIGHT_OFFSET,
+    camera_position.y - FLASHLIGHT_DOWN_OFFSET,
+    camera_position.z + camera_right.z * FLASHLIGHT_RIGHT_OFFSET
   )
-  lights[FLASHLIGHT_WIDE_LIGHT_INDEX].position = lights[FLASHLIGHT_LIGHT_INDEX].position
-  lights[FLASHLIGHT_WIDE_LIGHT_INDEX].spotDirection = lights[FLASHLIGHT_LIGHT_INDEX].spotDirection
-  lights[FLASHLIGHT_FILL_LIGHT_INDEX].position = lights[FLASHLIGHT_LIGHT_INDEX].position
+  local flashlight_uniform_position =
+    {flashlight_position.x, flashlight_position.y, flashlight_position.z, 1}
+  lights[FLASHLIGHT_LIGHT_INDEX].spotDirection = flashlight_direction
+  lights[FLASHLIGHT_LIGHT_INDEX].position = flashlight_uniform_position
+  lights[FLASHLIGHT_WIDE_LIGHT_INDEX].spotDirection = flashlight_direction
+  lights[FLASHLIGHT_WIDE_LIGHT_INDEX].position = flashlight_uniform_position
+  lights[FLASHLIGHT_FILL_LIGHT_INDEX].position = flashlight_uniform_position
 
   base_shading:resetShadowPass()
   if is_flashlight_enabled then
@@ -407,11 +395,9 @@ function lovr.draw(pass)
     lights[FLASHLIGHT_FILL_LIGHT_INDEX].mode = BaseShading.LightMode.kFragment
     shadow.lightIndex = FLASHLIGHT_LIGHT_INDEX
 
-    local flashlight_x, flashlight_y, flashlight_z =
-      lights[FLASHLIGHT_LIGHT_INDEX].position:unpack()
     base_shading:sendSpotlightShadow(
-      lovr.math.newVec3(flashlight_x, flashlight_y, flashlight_z),
-      lights[FLASHLIGHT_LIGHT_INDEX].spotDirection,
+      flashlight_position,
+      flashlight_direction,
       lights[FLASHLIGHT_LIGHT_INDEX].spotCutoff,
       0.1, -- near
       30 -- far
@@ -422,14 +408,9 @@ function lovr.draw(pass)
     lights[FLASHLIGHT_FILL_LIGHT_INDEX].mode = BaseShading.LightMode.kInactive
     shadow.lightIndex = MOON_LIGHT_INDEX
 
-    local moon_x, moon_y, moon_z = lights[MOON_LIGHT_INDEX].position:unpack()
     base_shading:sendDirectionalShadow(
-      lovr.math.newVec3(
-        moon_x * MOON_SHADOW_DISTANCE,
-        moon_y * MOON_SHADOW_DISTANCE,
-        moon_z * MOON_SHADOW_DISTANCE
-      ),
-      lovr.math.newVec3(-moon_x, -moon_y, -moon_z),
+      MOON_DIRECTION * MOON_SHADOW_DISTANCE,
+      -MOON_DIRECTION,
       MOON_SHADOW_ORTHOGRAPHIC_SIZE,
       8, -- near
       20 -- far
@@ -444,35 +425,15 @@ function lovr.draw(pass)
 
   base_shading:sendMaterial(pass, concrete_shading_material)
   for index, section in ipairs(floor_sections) do
-    local box_y = section.top_y - section.thickness / 2
+    local box_position = section.position - vector(0, section.size.y / 2, 0)
     pass:setMaterial(floor_section_materials[index])
-    pass:box(
-      section.x, box_y, section.z,
-      section.width, section.thickness, section.depth,
-      0, 0, 1, 0,
-      "fill"
-    )
-    base_shading.shadowPass:box(
-      section.x, box_y, section.z,
-      section.width, section.thickness, section.depth,
-      0, 0, 1, 0,
-      "fill"
-    )
+    pass:box(box_position, section.size, quaternion.identity, "fill")
+    base_shading.shadowPass:box(box_position, section.size, quaternion.identity, "fill")
   end
   for index, wall in ipairs(walls) do
     pass:setMaterial(wall_materials[index])
-    pass:box(
-      wall.x, wall.center_y, wall.z,
-      wall.box_width, wall.height, wall.box_depth,
-      0, 0, 1, 0,
-      "fill"
-    )
-    base_shading.shadowPass:box(
-      wall.x, wall.center_y, wall.z,
-      wall.box_width, wall.height, wall.box_depth,
-      0, 0, 1, 0,
-      "fill"
-    )
+    pass:box(wall.position, wall.size, wall.orientation, "fill")
+    base_shading.shadowPass:box(wall.position, wall.size, wall.orientation, "fill")
   end
 
   base_shading:sendMaterial(pass, floor_shading_material)
@@ -483,19 +444,11 @@ function lovr.draw(pass)
       pass:setMaterial(floor_material)
     end
 
-    local plane_y = section.top_y + FLOOR_PLANE_OFFSET
-    pass:plane(
-      section.x, plane_y, section.z,
-      section.width, section.depth,
-      -math.pi / 2, 1, 0, 0,
-      "fill"
-    )
-    base_shading.shadowPass:plane(
-      section.x, plane_y, section.z,
-      section.width, section.depth,
-      -math.pi / 2, 1, 0, 0,
-      "fill"
-    )
+    local plane_position = section.position + vector(0, FLOOR_PLANE_OFFSET, 0)
+    local plane_size = vector(section.size.x, section.size.z, 0)
+    local plane_orientation = quaternion.angleaxis(-math.pi / 2, 1, 0, 0)
+    pass:plane(plane_position, plane_size, plane_orientation, "fill")
+    base_shading.shadowPass:plane(plane_position, plane_size, plane_orientation, "fill")
   end
 
   base_shading:sendMaterial(pass, wall_shading_material)
@@ -506,39 +459,23 @@ function lovr.draw(pass)
       pass:setMaterial(wall_material)
     end
 
-    local normal_x, normal_z = math.sin(wall.angle), math.cos(wall.angle)
-    local plane_offset = wall.thickness / 2 + FLOOR_PLANE_OFFSET
-    local inner_x, inner_z = wall.x + normal_x * plane_offset, wall.z + normal_z * plane_offset
-    local outer_x, outer_z = wall.x - normal_x * plane_offset, wall.z - normal_z * plane_offset
-    pass:plane(
-      inner_x, wall.center_y, inner_z,
-      wall.width, wall.height,
-      wall.angle, 0, 1, 0,
-      "fill"
-    )
-    pass:plane(
-      outer_x, wall.center_y, outer_z,
-      wall.width, wall.height,
-      wall.angle + math.pi, 0, 1, 0,
-      "fill"
-    )
+    local plane_normal = wall.orientation * vector.backward
+    local plane_offset = wall.size.z / 2 + FLOOR_PLANE_OFFSET
+    local inner_plane_position = wall.position + plane_normal * plane_offset
+    local outer_plane_position = wall.position - plane_normal * plane_offset
+    local plane_size = vector(wall.size.x, wall.size.y, 0)
+    local outer_plane_orientation = quaternion.angleaxis(math.pi, 0, 1, 0) * wall.orientation
+    pass:plane(inner_plane_position, plane_size, wall.orientation, "fill")
+    pass:plane(outer_plane_position, plane_size, outer_plane_orientation, "fill")
   end
 
   pass:setMaterial(cube_material)
   base_shading:sendMaterial(pass, cube_shading_material)
   for _, cube_collider in ipairs(cube_colliders) do
-    local cube_x, cube_y, cube_z = cube_collider:getPosition()
-    local cube_angle, cube_ax, cube_ay, cube_az = cube_collider:getOrientation()
-    pass:cube(
-      cube_x, cube_y, cube_z, CUBE_SIZE,
-      cube_angle, cube_ax, cube_ay, cube_az,
-      "fill"
-    )
-    base_shading.shadowPass:cube(
-      cube_x, cube_y, cube_z, CUBE_SIZE,
-      cube_angle, cube_ax, cube_ay, cube_az,
-      "fill"
-    )
+    local cube_position = vector(cube_collider:getPosition())
+    local cube_orientation = quaternion.angleaxis(cube_collider:getOrientation())
+    pass:cube(cube_position, CUBE_SIZE, cube_orientation, "fill")
+    base_shading.shadowPass:cube(cube_position, CUBE_SIZE, cube_orientation, "fill")
   end
 
   return lovr.graphics.submit(base_shading.shadowPass, pass)
@@ -582,7 +519,7 @@ function lovr.keypressed(key)
 
   if key == "r" then
     carry_controller:release()
-    player_controller:teleport(0, PLAYER_START_Y, LOWER_ROOM_Z)
+    player_controller:teleport(vector(0, PLAYER_START_Y, LOWER_ROOM_Z))
   end
 
   if key == "f11" then

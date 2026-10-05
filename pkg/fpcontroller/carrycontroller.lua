@@ -22,10 +22,11 @@ local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
 local checks = require("luatypechecks.checks")
 local PoseController = require("pkg.fpcontroller.posecontroller")
-local collider_utils = require("pkg.fpcontroller.utils.collider")
-local rotation = require("pkg.fpcontroller.utils.rotation")
 local utils = require("pkg.fpcontroller.utils")
-local vector = require("pkg.fpcontroller.utils.vector")
+local vectorutils = require("pkg.fpcontroller.utils.vector")
+local colliderutils = require("pkg.fpcontroller.utils.collider")
+
+local _MIN_DIRECTION_LENGTH = 1e-9
 
 local function _get_camera_direction_and_orientation(camera_provider)
   assertions.is_table(camera_provider)
@@ -38,13 +39,15 @@ local function _get_camera_direction_and_orientation(camera_provider)
 
   if has_camera_orientation then
     local orientation = camera_provider:get_camera_orientation()
-    local direction_x, direction_y, direction_z = rotation.to_camera_direction(orientation)
-    return direction_x, direction_y, direction_z, orientation
+    return orientation:direction(), orientation
   end
 
-  local direction_x, direction_y, direction_z = camera_provider:get_camera_direction()
-  local orientation = rotation.from_camera_direction(direction_x, direction_y, direction_z)
-  return direction_x, direction_y, direction_z, orientation
+  local direction = camera_provider:get_camera_direction()
+  if direction:length() <= _MIN_DIRECTION_LENGTH then
+    error("camera direction must be nonzero")
+  end
+
+  return direction, quaternion.lookdir(direction)
 end
 
 ---
@@ -53,10 +56,8 @@ end
 -- @tfield table camera_provider camera pose provider (**read-only**)
 -- @tfield number interaction_distance maximum acquisition distance, in meters
 -- @tfield number maximum_carry_mass maximum acquired collider mass, in kilograms
--- @tfield number hold_distance target distance in front of the camera, in meters
--- @tfield number hold_offset_x horizontal target offset in camera-local coordinates, in meters
--- @tfield number hold_offset_y vertical target offset in camera-local coordinates, in meters
--- @tfield number pull_speed speed used to bring an acquired collider to hold distance
+-- @tfield vector hold_offset target offset in camera-local coordinates, in meters
+-- @tfield number pull_speed speed used to bring an acquired collider to the hold offset
 -- @tfield number held_linear_damping linear damping used while a collider is held
 -- @tfield number held_angular_damping angular damping used while a collider is held
 -- @tfield number break_distance sustained position error required to release, in meters
@@ -72,8 +73,8 @@ end
 -- @tfield number|nil held_original_linear_damping held collider linear damping to restore on release (**read-only**)
 -- @tfield number|nil held_original_angular_damping held collider angular damping to restore on release (**read-only**)
 -- @tfield number|nil held_original_gravity_scale held collider gravity scale to restore on release (**read-only**)
--- @tfield number|nil current_hold_distance current target distance in front of the camera, in meters (**read-only**)
--- @tfield table|nil held_relative_orientation held collider orientation relative to the camera (**read-only**)
+-- @tfield vector|nil current_hold_offset current target offset in camera-local coordinates, in meters (**read-only**)
+-- @tfield quaternion|nil held_relative_orientation held collider orientation relative to the camera (**read-only**)
 -- @tfield number break_timer duration of the current excessive position error, in seconds (**read-only**)
 
 local CarryController = middleclass("CarryController")
@@ -85,10 +86,8 @@ local CarryController = middleclass("CarryController")
 -- @tparam[opt={}] table options controller settings
 -- @tparam[opt=2.5] number options.interaction_distance maximum acquisition distance, in meters
 -- @tparam[opt=math.huge] number options.maximum_carry_mass maximum acquired collider mass, in kilograms
--- @tparam[opt=1] number options.hold_distance target distance in front of the camera, in meters
--- @tparam[opt=0] number options.hold_offset_x horizontal target offset in camera-local coordinates, in meters
--- @tparam[opt=0] number options.hold_offset_y vertical target offset in camera-local coordinates, in meters
--- @tparam[opt=6] number options.pull_speed speed used to bring an acquired collider to hold distance
+-- @tparam[opt=vector.forward] vector options.hold_offset target offset in camera-local coordinates, in meters
+-- @tparam[opt=6] number options.pull_speed speed used to bring an acquired collider to the hold offset
 -- @tparam[opt=0.8] number options.held_linear_damping linear damping used while a collider is held
 -- @tparam[opt=0.95] number options.held_angular_damping angular damping used while a collider is held
 -- @tparam[opt=0.75] number options.break_distance sustained position error required to release, in meters
@@ -112,9 +111,7 @@ function CarryController:initialize(world, camera_provider, options)
   options = utils.shallow_copy(options or {})
   options.interaction_distance = options.interaction_distance or 2.5
   options.maximum_carry_mass = options.maximum_carry_mass or math.huge
-  options.hold_distance = options.hold_distance or 1
-  options.hold_offset_x = options.hold_offset_x or 0
-  options.hold_offset_y = options.hold_offset_y or 0
+  options.hold_offset = options.hold_offset or vector.forward
   options.pull_speed = options.pull_speed or 6
   options.held_linear_damping = options.held_linear_damping or 0.8
   options.held_angular_damping = options.held_angular_damping or 0.95
@@ -128,9 +125,7 @@ function CarryController:initialize(world, camera_provider, options)
 
   assertions.is_number(options.interaction_distance)
   assertions.is_number(options.maximum_carry_mass)
-  assertions.is_number(options.hold_distance)
-  assertions.is_number(options.hold_offset_x)
-  assertions.is_number(options.hold_offset_y)
+  assertions.is_table(options.hold_offset)
   assertions.is_number(options.pull_speed)
   assertions.is_number(options.held_linear_damping)
   assertions.is_number(options.held_angular_damping)
@@ -146,9 +141,7 @@ function CarryController:initialize(world, camera_provider, options)
   self.camera_provider = camera_provider
   self.interaction_distance = options.interaction_distance
   self.maximum_carry_mass = options.maximum_carry_mass
-  self.hold_distance = options.hold_distance
-  self.hold_offset_x = options.hold_offset_x
-  self.hold_offset_y = options.hold_offset_y
+  self.hold_offset = options.hold_offset
   self.pull_speed = options.pull_speed
   self.held_linear_damping = options.held_linear_damping
   self.held_angular_damping = options.held_angular_damping
@@ -165,7 +158,7 @@ function CarryController:initialize(world, camera_provider, options)
   self.held_original_linear_damping = nil
   self.held_original_angular_damping = nil
   self.held_original_gravity_scale = nil
-  self.current_hold_distance = nil
+  self.current_hold_offset = nil
   self.held_relative_orientation = nil
   self.break_timer = 0
 end
@@ -190,18 +183,13 @@ function CarryController:acquire()
     return true
   end
 
-  local camera_x, camera_y, camera_z = self.camera_provider:get_camera_position()
-  local direction_x, direction_y, direction_z, camera_orientation =
-    _get_camera_direction_and_orientation(self.camera_provider)
+  local camera_position = self.camera_provider:get_camera_position()
+  local direction, camera_orientation = _get_camera_direction_and_orientation(self.camera_provider)
+  local cast_start = camera_position
+  local cast_finish = cast_start + direction * self.interaction_distance
   -- include non-carryable colliders so they can occlude carryable ones; acquisition eligibility
   -- is checked after finding the first visible collider
-  local collider = self.world:raycast(
-    camera_x, camera_y, camera_z,
-    camera_x + direction_x * self.interaction_distance,
-    camera_y + direction_y * self.interaction_distance,
-    camera_z + direction_z * self.interaction_distance,
-    self.interaction_filter
-  )
+  local collider = self.world:raycast(cast_start, cast_finish, self.interaction_filter)
   if
     collider == nil
       or collider:getTag() ~= self.carryable_tag
@@ -210,10 +198,9 @@ function CarryController:acquire()
     return false
   end
 
-  local center_x, center_y, center_z = collider_utils.get_center_of_mass(collider)
-  local center_distance =
-    vector.length(center_x - camera_x, center_y - camera_y, center_z - camera_z)
-  self:_start_holding(collider, center_distance, camera_orientation)
+  local center_offset = colliderutils.get_center_of_mass(collider) - camera_position
+  local current_hold_offset = camera_orientation:conjugate() * center_offset
+  self:_start_holding(collider, current_hold_offset, camera_orientation)
 
   return true
 end
@@ -237,7 +224,7 @@ function CarryController:release()
 
   self.held_collider = nil
   self.pose_controller = nil
-  self.current_hold_distance = nil
+  self.current_hold_offset = nil
   self.held_relative_orientation = nil
   self.break_timer = 0
 
@@ -255,28 +242,16 @@ function CarryController:pre_physics_update(dt)
     return
   end
 
-  local hold_distance_delta = self.hold_distance - self.current_hold_distance
-  local maximum_hold_distance_delta = self.pull_speed * dt
-  if math.abs(hold_distance_delta) > maximum_hold_distance_delta then
-    hold_distance_delta = hold_distance_delta < 0
-      and -maximum_hold_distance_delta
-      or maximum_hold_distance_delta
-  end
-  self.current_hold_distance = self.current_hold_distance + hold_distance_delta
+  local hold_offset_delta = self.hold_offset - self.current_hold_offset
+  local maximum_hold_offset_delta = self.pull_speed * dt
+  self.current_hold_offset = self.current_hold_offset
+    + vectorutils.limit_length(hold_offset_delta, maximum_hold_offset_delta)
 
-  local camera_x, camera_y, camera_z = self.camera_provider:get_camera_position()
-  local _, _, _, camera_orientation = _get_camera_direction_and_orientation(self.camera_provider)
-  local target_offset_x, target_offset_y, target_offset_z = rotation.rotate_vector(
-    camera_orientation,
-    self.hold_offset_x, self.hold_offset_y, -self.current_hold_distance
-  )
-  local target_orientation = rotation.multiply(camera_orientation, self.held_relative_orientation)
-  local target_angle, target_axis_x, target_axis_y, target_axis_z =
-    rotation.to_angle_axis(target_orientation)
-  self.pose_controller:set_target_pose(
-    camera_x + target_offset_x, camera_y + target_offset_y, camera_z + target_offset_z,
-    target_angle, target_axis_x, target_axis_y, target_axis_z
-  )
+  local camera_position = self.camera_provider:get_camera_position()
+  local _, camera_orientation = _get_camera_direction_and_orientation(self.camera_provider)
+  local target_offset = camera_orientation * self.current_hold_offset
+  local target_orientation = camera_orientation * self.held_relative_orientation
+  self.pose_controller:set_target_pose(camera_position + target_offset, target_orientation)
   self.pose_controller:pre_physics_update(dt)
 end
 
@@ -303,9 +278,9 @@ function CarryController:post_physics_update(dt)
   end
 end
 
-function CarryController:_start_holding(collider, center_distance, camera_orientation)
+function CarryController:_start_holding(collider, current_hold_offset, camera_orientation)
   assertions.is_true(type(collider) == "userdata" or checks.is_table(collider))
-  assertions.is_number(center_distance)
+  assertions.is_table(current_hold_offset)
   assertions.is_table(camera_orientation)
 
   self.held_original_tag = collider:getTag()
@@ -319,11 +294,9 @@ function CarryController:_start_holding(collider, center_distance, camera_orient
 
   self.held_collider = collider
   self.pose_controller = PoseController:new(collider, self.pose_controller_options)
-  self.current_hold_distance = center_distance
-  self.held_relative_orientation = rotation.multiply(
-    rotation.inverse(camera_orientation),
-    collider_utils.get_orientation(collider)
-  )
+  self.current_hold_offset = current_hold_offset
+  self.held_relative_orientation =
+    camera_orientation:conjugate() * colliderutils.get_orientation(collider)
   self.break_timer = 0
 
   self.on_held_collider_changed(collider, nil)

@@ -6,25 +6,21 @@ local assertions = require("luatypechecks.assertions")
 
 ---
 -- @table instance
--- @tfield number center_z
--- @tfield number floor_height
+-- @tfield vector floor_position floor-center position
 -- @tfield "positive"|"negative" open_side
 
 local Room = middleclass("Room")
 
 ---
 -- @function new
--- @tparam number center_z
--- @tparam number floor_height
+-- @tparam vector floor_position floor-center position
 -- @tparam "positive"|"negative" open_side
 -- @treturn Room
-function Room:initialize(center_z, floor_height, open_side)
-  assertions.is_number(center_z)
-  assertions.is_number(floor_height)
+function Room:initialize(floor_position, open_side)
+  assertions.is_table(floor_position)
   assertions.is_enumeration(open_side, {"positive", "negative"})
 
-  self.center_z = center_z
-  self.floor_height = floor_height
+  self.floor_position = floor_position
   self.open_side = open_side
 end
 

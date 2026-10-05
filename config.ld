@@ -2,12 +2,13 @@ project = "the-game-no-2"
 title = "the-game-no-2 documentation"
 description = "the-game-no-2 documentation"
 file = {
+  "constants/tests.lua",
   "models/floorsection.lua",
   "models/room.lua",
   "models/wall.lua",
   "pkg/fpcontroller/utils/init.lua",
   "pkg/fpcontroller/utils/vector.lua",
-  "pkg/fpcontroller/utils/rotation.lua",
+  "pkg/fpcontroller/utils/quaternion.lua",
   "pkg/fpcontroller/utils/collider.lua",
   "pkg/fpcontroller/fpcontroller.lua",
   "pkg/fpcontroller/posecontroller.lua",

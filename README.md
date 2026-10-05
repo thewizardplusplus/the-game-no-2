@@ -24,6 +24,14 @@ $ lovr .
 
 See for details: <https://lovr.org/docs/Getting_Started>
 
+## Testing
+
+Run the test suite with the [LÖVR](https://lovr.org/) engine (the environment variable enables the headless test configuration):
+
+```
+$ LOVR_HEADLESS_TEST=TRUE lovr test.lua
+```
+
 ## License
 
 The MIT License (MIT)

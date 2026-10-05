@@ -4,64 +4,37 @@
 local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
 
+local _WALL_ORIENTATIONS = {
+  left = quaternion.angleaxis(math.pi / 2, 0, 1, 0),
+  right = quaternion.angleaxis(-math.pi / 2, 0, 1, 0),
+  front = quaternion.identity,
+}
+
 ---
 -- @table instance
--- @tfield number x
--- @tfield number center_y
--- @tfield number z
--- @tfield number width
--- @tfield number height
--- @tfield number thickness
--- @tfield number angle
--- @tfield number box_width
--- @tfield number box_depth
+-- @tfield vector position center position
+-- @tfield vector size visible width, height, and collider thickness
+-- @tfield quaternion orientation wall orientation
 -- @tfield "room"|"stair" surface_kind
 
 local Wall = middleclass("Wall")
 
 ---
 -- @function new
--- @tparam number x
--- @tparam number bottom_y
--- @tparam number z
--- @tparam number width
--- @tparam number height
--- @tparam number thickness
+-- @tparam vector bottom_position bottom-center position
+-- @tparam vector size visible width, height, and collider thickness
 -- @tparam "left"|"right"|"front" direction
 -- @tparam "room"|"stair" surface_kind
 -- @treturn Wall
-function Wall:initialize(
-  x, bottom_y, z,
-  width, height, thickness,
-  direction,
-  surface_kind
-)
-  assertions.is_number(x)
-  assertions.is_number(bottom_y)
-  assertions.is_number(z)
-  assertions.is_number(width)
-  assertions.is_number(height)
-  assertions.is_number(thickness)
+function Wall:initialize(bottom_position, size, direction, surface_kind)
+  assertions.is_table(bottom_position)
+  assertions.is_table(size)
   assertions.is_enumeration(direction, {"left", "right", "front"})
   assertions.is_enumeration(surface_kind, {"room", "stair"})
 
-  local angle = nil
-  local box_width, box_depth = nil, nil
-  if direction == "left" then
-    angle = math.pi / 2
-    box_width, box_depth = thickness, width
-  elseif direction == "right" then
-    angle = -math.pi / 2
-    box_width, box_depth = thickness, width
-  elseif direction == "front" then
-    angle = 0
-    box_width, box_depth = width, thickness
-  end
-
-  self.x, self.center_y, self.z = x, bottom_y + height / 2, z
-  self.width, self.height, self.thickness = width, height, thickness
-  self.angle = angle
-  self.box_width, self.box_depth = box_width, box_depth
+  self.position = bottom_position + vector(0, size.y / 2, 0)
+  self.size = size
+  self.orientation = _WALL_ORIENTATIONS[direction]
   self.surface_kind = surface_kind
 end
 

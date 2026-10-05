@@ -16,10 +16,26 @@
 local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
 local checks = require("luatypechecks.checks")
-local collider_utils = require("pkg.fpcontroller.utils.collider")
-local rotation = require("pkg.fpcontroller.utils.rotation")
-local vector = require("pkg.fpcontroller.utils.vector")
 local utils = require("pkg.fpcontroller.utils")
+local vectorutils = require("pkg.fpcontroller.utils.vector")
+local quaternionutils = require("pkg.fpcontroller.utils.quaternion")
+local colliderutils = require("pkg.fpcontroller.utils.collider")
+
+local function _calculate_pd_acceleration(
+  displacement_error,
+  velocity_error,
+  frequency,
+  damping_ratio
+)
+  assertions.is_table(displacement_error)
+  assertions.is_table(velocity_error)
+  assertions.is_number(frequency)
+  assertions.is_number(damping_ratio)
+
+  local angular_frequency = (2 * math.pi) * frequency
+  return angular_frequency ^ 2 * displacement_error
+    + 2 * damping_ratio * angular_frequency * velocity_error
+end
 
 ---
 -- @table instance
@@ -32,22 +48,14 @@ local utils = require("pkg.fpcontroller.utils")
 -- @tfield number max_angular_speed maximum target angular speed, in radians per second
 -- @tfield number max_linear_acceleration maximum applied linear acceleration
 -- @tfield number max_angular_acceleration maximum applied angular acceleration
--- @tfield number target_x target center-of-mass X coordinate (**read-only**)
--- @tfield number target_y target center-of-mass Y coordinate (**read-only**)
--- @tfield number target_z target center-of-mass Z coordinate (**read-only**)
--- @tfield table target_orientation target orientation quaternion (**read-only**)
--- @tfield number previous_target_x previous target X coordinate used to derive velocity (**read-only**)
--- @tfield number previous_target_y previous target Y coordinate used to derive velocity (**read-only**)
--- @tfield number previous_target_z previous target Z coordinate used to derive velocity (**read-only**)
--- @tfield table previous_target_orientation previous target orientation used to derive angular velocity (**read-only**)
+-- @tfield vector target_position target center-of-mass position (**read-only**)
+-- @tfield quaternion target_orientation target orientation (**read-only**)
+-- @tfield vector previous_target_position previous target used to derive velocity (**read-only**)
+-- @tfield quaternion previous_target_orientation previous target orientation used to derive angular velocity (**read-only**)
 -- @tfield number position_error latest center-of-mass position error magnitude (**read-only**)
 -- @tfield number orientation_error latest orientation error magnitude, in radians (**read-only**)
--- @tfield number last_force_x last applied force X component (**read-only**)
--- @tfield number last_force_y last applied force Y component (**read-only**)
--- @tfield number last_force_z last applied force Z component (**read-only**)
--- @tfield number last_torque_x last applied torque X component (**read-only**)
--- @tfield number last_torque_y last applied torque Y component (**read-only**)
--- @tfield number last_torque_z last applied torque Z component (**read-only**)
+-- @tfield vector last_force last applied force (**read-only**)
+-- @tfield vector last_torque last applied torque (**read-only**)
 
 local PoseController = middleclass("PoseController")
 
@@ -87,8 +95,8 @@ function PoseController:initialize(collider, options)
   assertions.is_number(options.max_linear_acceleration)
   assertions.is_number(options.max_angular_acceleration)
 
-  local target_x, target_y, target_z = collider_utils.get_center_of_mass(collider)
-  local target_orientation = collider_utils.get_orientation(collider)
+  local target_position = colliderutils.get_center_of_mass(collider)
+  local target_orientation = colliderutils.get_orientation(collider)
 
   self.collider = collider
   self.position_frequency = options.position_frequency
@@ -99,15 +107,14 @@ function PoseController:initialize(collider, options)
   self.max_angular_speed = options.max_angular_speed
   self.max_linear_acceleration = options.max_linear_acceleration
   self.max_angular_acceleration = options.max_angular_acceleration
-  self.target_x, self.target_y, self.target_z = target_x, target_y, target_z
+  self.target_position = target_position
   self.target_orientation = target_orientation
-  self.previous_target_x, self.previous_target_y, self.previous_target_z =
-    target_x, target_y, target_z
+  self.previous_target_position = target_position
   self.previous_target_orientation = target_orientation
   self.position_error = 0
   self.orientation_error = 0
-  self.last_force_x, self.last_force_y, self.last_force_z = 0, 0, 0
-  self.last_torque_x, self.last_torque_y, self.last_torque_z = 0, 0, 0
+  self.last_force = vector.zero
+  self.last_torque = vector.zero
 end
 
 ---
@@ -125,19 +132,15 @@ function PoseController:get_orientation_error()
 end
 
 ---
--- @treturn number last applied force X component
--- @treturn number last applied force Y component
--- @treturn number last applied force Z component
+-- @treturn vector last applied force
 function PoseController:get_applied_force()
-  return self.last_force_x, self.last_force_y, self.last_force_z
+  return self.last_force
 end
 
 ---
--- @treturn number last applied torque X component
--- @treturn number last applied torque Y component
--- @treturn number last applied torque Z component
+-- @treturn vector last applied torque
 function PoseController:get_applied_torque()
-  return self.last_torque_x, self.last_torque_y, self.last_torque_z
+  return self.last_torque
 end
 
 ---
@@ -146,143 +149,96 @@ end
 function PoseController:pre_physics_update(dt)
   assertions.is_number(dt)
 
-  local velocity_x, velocity_y, velocity_z = self.collider:getLinearVelocity()
-  local target_velocity_x = (self.target_x - self.previous_target_x) / dt
-  local target_velocity_y = (self.target_y - self.previous_target_y) / dt
-  local target_velocity_z = (self.target_z - self.previous_target_z) / dt
-  target_velocity_x, target_velocity_y, target_velocity_z = vector.limit_length(
-    target_velocity_x, target_velocity_y, target_velocity_z,
+  local velocity = vector(self.collider:getLinearVelocity())
+  local target_velocity = vectorutils.limit_length(
+    (self.target_position - self.previous_target_position) / dt,
     self.max_linear_speed
   )
 
-  local position_angular_frequency = (2 * math.pi) * self.position_frequency
-  local position_error_x, position_error_y, position_error_z = self:_update_position_error()
-  local acceleration_x =
-    position_angular_frequency ^ 2 * position_error_x +
-    2 * self.position_damping * position_angular_frequency * (target_velocity_x - velocity_x)
-  local acceleration_y =
-    position_angular_frequency ^ 2 * position_error_y +
-    2 * self.position_damping * position_angular_frequency * (target_velocity_y - velocity_y)
-  local acceleration_z =
-    position_angular_frequency ^ 2 * position_error_z +
-    2 * self.position_damping * position_angular_frequency * (target_velocity_z - velocity_z)
-  acceleration_x, acceleration_y, acceleration_z = vector.limit_length(
-    acceleration_x, acceleration_y, acceleration_z,
+  local position_error = self:_update_position_error()
+  local velocity_error = target_velocity - velocity
+  local acceleration = vectorutils.limit_length(
+    _calculate_pd_acceleration(
+      position_error,
+      velocity_error,
+      self.position_frequency,
+      self.position_damping
+    ),
     self.max_linear_acceleration
   )
 
-  local mass = self.collider:getMass()
-  self.last_force_x, self.last_force_y, self.last_force_z =
-    acceleration_x * mass, acceleration_y * mass, acceleration_z * mass
-  self.collider:applyForce(self.last_force_x, self.last_force_y, self.last_force_z)
+  self.last_force = acceleration * self.collider:getMass()
+  self.collider:applyForce(self.last_force)
 
   local target_orientation_delta =
-    rotation.difference(self.previous_target_orientation, self.target_orientation)
-  local target_angular_velocity_x, target_angular_velocity_y, target_angular_velocity_z =
-    rotation.to_rotation_vector(target_orientation_delta)
-  target_angular_velocity_x, target_angular_velocity_y, target_angular_velocity_z =
-    vector.limit_length(
-      target_angular_velocity_x / dt,
-      target_angular_velocity_y / dt,
-      target_angular_velocity_z / dt,
-      self.max_angular_speed
-    )
+    quaternionutils.difference(self.previous_target_orientation, self.target_orientation)
+  local target_angular_velocity = vectorutils.limit_length(
+    quaternionutils.to_rotation_vector(target_orientation_delta) / dt,
+    self.max_angular_speed
+  )
 
-  local rotation_angular_frequency = (2 * math.pi) * self.rotation_frequency
-  local orientation, rotation_error_x, rotation_error_y, rotation_error_z =
-    self:_update_orientation_error()
-  local angular_velocity_x, angular_velocity_y, angular_velocity_z =
-    self.collider:getAngularVelocity()
-  local angular_acceleration_x =
-    rotation_angular_frequency ^ 2 * rotation_error_x +
-    2 * self.rotation_damping * rotation_angular_frequency *
-      (target_angular_velocity_x - angular_velocity_x)
-  local angular_acceleration_y =
-    rotation_angular_frequency ^ 2 * rotation_error_y +
-    2 * self.rotation_damping * rotation_angular_frequency *
-      (target_angular_velocity_y - angular_velocity_y)
-  local angular_acceleration_z =
-    rotation_angular_frequency ^ 2 * rotation_error_z +
-    2 * self.rotation_damping * rotation_angular_frequency *
-      (target_angular_velocity_z - angular_velocity_z)
-  angular_acceleration_x, angular_acceleration_y, angular_acceleration_z = vector.limit_length(
-    angular_acceleration_x, angular_acceleration_y, angular_acceleration_z,
+  local orientation, rotation_error = self:_update_orientation_error()
+  local angular_velocity_error =
+    target_angular_velocity - vector(self.collider:getAngularVelocity())
+  local angular_acceleration = vectorutils.limit_length(
+    _calculate_pd_acceleration(
+      rotation_error,
+      angular_velocity_error,
+      self.rotation_frequency,
+      self.rotation_damping
+    ),
     self.max_angular_acceleration
   )
 
-  self.last_torque_x, self.last_torque_y, self.last_torque_z = self:_get_world_torque(
-    orientation,
-    angular_acceleration_x, angular_acceleration_y, angular_acceleration_z
-  )
-  self.collider:applyTorque(self.last_torque_x, self.last_torque_y, self.last_torque_z)
+  self.last_torque = self:_get_world_torque(orientation, angular_acceleration)
+  self.collider:applyTorque(self.last_torque)
 
-  self.previous_target_x, self.previous_target_y, self.previous_target_z =
-    self.target_x, self.target_y, self.target_z
+  self.previous_target_position = self.target_position
   self.previous_target_orientation = self.target_orientation
 end
 
 ---
 -- ⚠️. Set the desired center-of-mass position and collider orientation.
--- @tparam number x target center-of-mass X coordinate
--- @tparam number y target center-of-mass Y coordinate
--- @tparam number z target center-of-mass Z coordinate
--- @tparam number angle target orientation angle, in radians
--- @tparam number axis_x target orientation axis X component
--- @tparam number axis_y target orientation axis Y component
--- @tparam number axis_z target orientation axis Z component
-function PoseController:set_target_pose(x, y, z, angle, axis_x, axis_y, axis_z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
-  assertions.is_number(angle)
-  assertions.is_number(axis_x)
-  assertions.is_number(axis_y)
-  assertions.is_number(axis_z)
+-- @tparam vector position target center-of-mass position
+-- @tparam quaternion orientation target orientation
+function PoseController:set_target_pose(position, orientation)
+  assertions.is_table(position)
+  assertions.is_table(orientation)
 
-  self.target_x, self.target_y, self.target_z = x, y, z
-  self.target_orientation = rotation.from_angle_and_axis(angle, axis_x, axis_y, axis_z)
+  self.target_position = position
+  self.target_orientation = orientation
 end
 
 function PoseController:_update_position_error()
-  local x, y, z = collider_utils.get_center_of_mass(self.collider)
-  local error_x, error_y, error_z = self.target_x - x, self.target_y - y, self.target_z - z
-  self.position_error = vector.length(error_x, error_y, error_z)
+  local position = colliderutils.get_center_of_mass(self.collider)
+  local error = self.target_position - position
+  self.position_error = error:length()
 
-  return error_x, error_y, error_z
+  return error
 end
 
 function PoseController:_update_orientation_error()
-  local orientation = collider_utils.get_orientation(self.collider)
-  local orientation_delta = rotation.difference(orientation, self.target_orientation)
-  local error_x, error_y, error_z = rotation.to_rotation_vector(orientation_delta)
-  self.orientation_error = vector.length(error_x, error_y, error_z)
+  local orientation = colliderutils.get_orientation(self.collider)
+  local orientation_delta = quaternionutils.difference(orientation, self.target_orientation)
+  local error = quaternionutils.to_rotation_vector(orientation_delta)
+  self.orientation_error = error:length()
 
-  return orientation, error_x, error_y, error_z
+  return orientation, error
 end
 
-function PoseController:_get_world_torque(
-  orientation,
-  acceleration_x, acceleration_y, acceleration_z
-)
+function PoseController:_get_world_torque(orientation, acceleration)
   assertions.is_table(orientation)
-  assertions.is_number(acceleration_x)
-  assertions.is_number(acceleration_y)
-  assertions.is_number(acceleration_z)
+  assertions.is_table(acceleration)
 
   local inertia_x, inertia_y, inertia_z,
-    inertia_angle, inertia_axis_x, inertia_axis_y, inertia_axis_z = self.collider:getInertia()
+    inertia_angle, inertia_axis_x, inertia_axis_y, inertia_axis_z =
+      self.collider:getInertia()
   local inertia_orientation =
-    rotation.from_angle_and_axis(inertia_angle, inertia_axis_x, inertia_axis_y, inertia_axis_z)
-  local world_inertia_orientation = rotation.multiply(orientation, inertia_orientation)
-  local inverse_world_inertia_orientation = rotation.inverse(world_inertia_orientation)
-  local local_x, local_y, local_z = rotation.rotate_vector(
-    inverse_world_inertia_orientation,
-    acceleration_x, acceleration_y, acceleration_z
-  )
-  return rotation.rotate_vector(
-    world_inertia_orientation,
-    local_x * inertia_x, local_y * inertia_y, local_z * inertia_z
-  )
+    quaternion.angleaxis(inertia_angle, inertia_axis_x, inertia_axis_y, inertia_axis_z)
+  local world_inertia_orientation = orientation * inertia_orientation
+  local local_acceleration = world_inertia_orientation:conjugate() * acceleration
+  local local_torque = local_acceleration * vector(inertia_x, inertia_y, inertia_z)
+  return world_inertia_orientation * local_torque
 end
 
 return PoseController

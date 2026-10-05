@@ -5,9 +5,8 @@ local Room = require("models.room")
 TestRoom = {}
 
 function TestRoom.test_new()
-  local room = Room:new(1, 2, "positive")
+  local room = Room:new(vector(0, 2, 1), "positive")
 
-  luaunit.assert_equals(room.center_z, 1)
-  luaunit.assert_equals(room.floor_height, 2)
+  luaunit.assert_equals(room.floor_position, vector(0, 2, 1))
   luaunit.assert_equals(room.open_side, "positive")
 end

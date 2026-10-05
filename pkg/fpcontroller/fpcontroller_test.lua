@@ -2,38 +2,22 @@ local luaunit = require("luaunit")
 local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
 local FPController = require("pkg.fpcontroller.fpcontroller")
-local rotation = require("pkg.fpcontroller.utils.rotation")
+local utils = require("pkg.fpcontroller.utils")
 local _ENV = require("compat53.module")
 if _VERSION == "Lua 5.1" then
   setfenv(1, _ENV)
-end
-
--- MockMatrix
-
-local MockMatrix = middleclass("MockMatrix")
-
-function MockMatrix:lookAt(from, to)
-  assertions.is_table(from)
-  assertions.is_table(to)
-
-  self.from, self.to = from, to
-  return self
 end
 
 -- MockShape
 
 local MockShape = middleclass("MockShape")
 
-function MockShape:setOffset(x, y, z, angle, axis_x, axis_y, axis_z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
-  assertions.is_number(angle)
-  assertions.is_number(axis_x)
-  assertions.is_number(axis_y)
-  assertions.is_number(axis_z)
+function MockShape:setOffset(position, orientation)
+  assertions.is_table(position)
+  assertions.is_table(orientation)
 
-  self.offset = {x, y, z, angle, axis_x, axis_y, axis_z}
+  self.offset_position = position
+  self.offset_orientation = orientation
 end
 
 -- MockCollider
@@ -41,9 +25,9 @@ end
 local MockCollider = middleclass("MockCollider")
 
 function MockCollider:initialize()
-  self.x, self.y, self.z = 0, 0, 0
-  self.velocity_x, self.velocity_y, self.velocity_z = 0, 0, 0
-  self.surface_velocity_x, self.surface_velocity_y, self.surface_velocity_z = 0, 0, 0
+  self.position = vector.zero
+  self.velocity = vector.zero
+  self.surface_velocity = vector.zero
   self.applied_forces = {}
   self.shape = MockShape:new()
 end
@@ -51,45 +35,37 @@ end
 -- MockCollider / Motion
 
 function MockCollider:getPosition()
-  return self.x, self.y, self.z
+  return self.position:unpack()
 end
 
-function MockCollider:setPosition(x, y, z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
+function MockCollider:setPosition(position)
+  assertions.is_table(position)
 
-  self.x, self.y, self.z = x, y, z
+  self.position = position
 end
 
 function MockCollider:getLinearVelocity()
-  return self.velocity_x, self.velocity_y, self.velocity_z
+  return self.velocity:unpack()
 end
 
-function MockCollider:setLinearVelocity(x, y, z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
+function MockCollider:setLinearVelocity(velocity)
+  assertions.is_table(velocity)
 
-  self.velocity_x, self.velocity_y, self.velocity_z = x, y, z
+  self.velocity = velocity
 end
 
-function MockCollider:getLinearVelocityFromWorldPoint(x, y, z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
+function MockCollider:getLinearVelocityFromWorldPoint(point)
+  assertions.is_table(point)
 
-  self.velocity_point = {x, y, z}
-  return self.surface_velocity_x, self.surface_velocity_y, self.surface_velocity_z
+  self.velocity_point = point
+  return self.surface_velocity:unpack()
 end
 
-function MockCollider:applyForce(x, y, z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
+function MockCollider:applyForce(force)
+  assertions.is_table(force)
 
-  self.force_x, self.force_y, self.force_z = x, y, z
-  table.insert(self.applied_forces, {x, y, z})
+  self.force = force
+  table.insert(self.applied_forces, force)
 end
 
 function MockCollider:setContinuous(value)
@@ -161,20 +137,12 @@ end
 
 -- MockWorld / Queries
 
-function MockWorld:raycast(start_x, start_y, start_z, end_x, end_y, end_z, filter)
-  assertions.is_number(start_x)
-  assertions.is_number(start_y)
-  assertions.is_number(start_z)
-  assertions.is_number(end_x)
-  assertions.is_number(end_y)
-  assertions.is_number(end_z)
+function MockWorld:raycast(start, finish, filter)
+  assertions.is_table(start)
+  assertions.is_table(finish)
   assertions.is_string(filter)
 
-  table.insert(self.raycast_calls, {
-    start_x, start_y, start_z,
-    end_x, end_y, end_z,
-    filter,
-  })
+  table.insert(self.raycast_calls, {start, finish, filter})
 
   local result = self.raycast_results[#self.raycast_calls]
   if not result then
@@ -186,31 +154,18 @@ end
 
 function MockWorld:shapecast(
   shape,
-  start_x, start_y, start_z,
-  end_x, end_y, end_z,
-  angle, axis_x, axis_y, axis_z,
+  start,
+  finish,
+  orientation,
   filter
 )
   assertions.is_instance(shape, MockShape)
-  assertions.is_number(start_x)
-  assertions.is_number(start_y)
-  assertions.is_number(start_z)
-  assertions.is_number(end_x)
-  assertions.is_number(end_y)
-  assertions.is_number(end_z)
-  assertions.is_number(angle)
-  assertions.is_number(axis_x)
-  assertions.is_number(axis_y)
-  assertions.is_number(axis_z)
+  assertions.is_table(start)
+  assertions.is_table(finish)
+  assertions.is_table(orientation)
   assertions.is_string(filter)
 
-  table.insert(self.shapecast_calls, {
-    shape,
-    start_x, start_y, start_z,
-    end_x, end_y, end_z,
-    angle, axis_x, axis_y, axis_z,
-    filter,
-  })
+  table.insert(self.shapecast_calls, {shape, start, finish, orientation, filter})
 
   local result = self.shapecast_results[#self.shapecast_calls]
   if not result then
@@ -222,29 +177,18 @@ end
 
 function MockWorld:overlapShape(
   shape,
-  x, y, z,
-  angle, axis_x, axis_y, axis_z,
+  position,
+  orientation,
   maximum_distance,
   filter
 )
   assertions.is_instance(shape, MockShape)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
-  assertions.is_number(angle)
-  assertions.is_number(axis_x)
-  assertions.is_number(axis_y)
-  assertions.is_number(axis_z)
+  assertions.is_table(position)
+  assertions.is_table(orientation)
   assertions.is_number(maximum_distance)
   assertions.is_string(filter)
 
-  table.insert(self.overlap_calls, {
-    shape,
-    x, y, z,
-    angle, axis_x, axis_y, axis_z,
-    maximum_distance,
-    filter,
-  })
+  table.insert(self.overlap_calls, {shape, position, orientation, maximum_distance, filter})
 
   local result = self.overlap_results[#self.overlap_calls]
   if not result then
@@ -256,16 +200,14 @@ end
 
 -- MockWorld / Colliders
 
-function MockWorld:newCapsuleCollider(x, y, z, radius, length)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
+function MockWorld:newCapsuleCollider(position, radius, length)
+  assertions.is_table(position)
   assertions.is_number(radius)
   assertions.is_number(length)
 
-  self.new_capsule_collider_arguments = {x, y, z, radius, length}
+  self.new_capsule_collider_arguments = {position, radius, length}
 
-  self.collider:setPosition(x, y, z)
+  self.collider:setPosition(position)
   self.collider.radius, self.collider.length = radius, length
 
   return self.collider
@@ -276,22 +218,24 @@ end
 local function _ground_hit(options)
   assertions.is_table_or_nil(options)
 
-  options = options or {}
-  assertions.is_table_or_nil(options.collider)
-  assertions.is_table_or_nil(options.shape)
-  assertions.is_number_or_nil(options.x)
-  assertions.is_number_or_nil(options.y)
-  assertions.is_number_or_nil(options.z)
-  assertions.is_number_or_nil(options.normal_x)
-  assertions.is_number_or_nil(options.normal_y)
-  assertions.is_number_or_nil(options.normal_z)
-  assertions.is_number_or_nil(options.triangle)
+  options = utils.shallow_copy(options or {})
+  options.collider = options.collider or {}
+  options.shape = options.shape or {}
+  options.position = options.position or vector.zero
+  options.normal = options.normal or vector.up
+  options.triangle = options.triangle or 0
+
+  assertions.is_table(options.collider)
+  assertions.is_table(options.shape)
+  assertions.is_table(options.position)
+  assertions.is_table(options.normal)
+  assertions.is_number(options.triangle)
 
   return {
-    options.collider or {}, options.shape or {},
-    options.x or 0, options.y or 0, options.z or 0,
-    options.normal_x or 0, options.normal_y or 1, options.normal_z or 0,
-    options.triangle or 0,
+    options.collider, options.shape,
+    options.position.x, options.position.y, options.position.z,
+    options.normal.x, options.normal.y, options.normal.z,
+    options.triangle,
   }
 end
 
@@ -299,23 +243,25 @@ local function _dynamic_hit(collider, options)
   assertions.is_instance(collider, MockCollider)
   assertions.is_table_or_nil(options)
 
-  options = options or {}
-  assertions.is_table_or_nil(options.shape)
-  assertions.is_number_or_nil(options.x)
-  assertions.is_number_or_nil(options.y)
-  assertions.is_number_or_nil(options.z)
-  assertions.is_number_or_nil(options.normal_x)
-  assertions.is_number_or_nil(options.normal_y)
-  assertions.is_number_or_nil(options.normal_z)
-  assertions.is_number_or_nil(options.fraction)
-  assertions.is_number_or_nil(options.triangle)
+  options = utils.shallow_copy(options or {})
+  options.shape = options.shape or {}
+  options.position = options.position or vector.zero
+  options.normal = options.normal or vector.backward
+  options.fraction = options.fraction or 0
+  options.triangle = options.triangle or 0
+
+  assertions.is_table(options.shape)
+  assertions.is_table(options.position)
+  assertions.is_table(options.normal)
+  assertions.is_number(options.fraction)
+  assertions.is_number(options.triangle)
 
   return {
-    collider, options.shape or {},
-    options.x or 0, options.y or 0, options.z or 0,
-    options.normal_x or 0, options.normal_y or 0, options.normal_z or 1,
-    options.fraction or 0,
-    options.triangle or 0,
+    collider, options.shape,
+    options.position.x, options.position.y, options.position.z,
+    options.normal.x, options.normal.y, options.normal.z,
+    options.fraction,
+    options.triangle,
   }
 end
 
@@ -340,7 +286,11 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_equals({collider:getPosition()}, {0, 0, 0})
   luaunit.assert_equals(collider.radius, 0.3)
   luaunit.assert_almost_equals(collider.length, 1.2)
-  luaunit.assert_equals(collider.shape.offset, {0, 0, 0, math.pi / 2, 1, 0, 0})
+  luaunit.assert_equals(collider.shape.offset_position, vector.zero)
+  luaunit.assert_equals(
+    collider.shape.offset_orientation,
+    quaternion.angleaxis(math.pi / 2, 1, 0, 0)
+  )
   luaunit.assert_equals(collider.tag, "player")
   luaunit.assert_equals(collider.configured_mass, 75)
   luaunit.assert_equals(collider.friction, 0)
@@ -349,11 +299,9 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_false(collider.sleeping_allowed)
   luaunit.assert_equals(collider.degrees_of_freedom, {"xyz", ""})
 
-  luaunit.assert_equals(
-    {table.unpack(world.new_capsule_collider_arguments, 1, 4)},
-    {0, 0, 0, 0.3}
-  )
-  luaunit.assert_almost_equals(world.new_capsule_collider_arguments[5], 1.2)
+  luaunit.assert_equals(world.new_capsule_collider_arguments[1], vector.zero)
+  luaunit.assert_equals(world.new_capsule_collider_arguments[2], 0.3)
+  luaunit.assert_almost_equals(world.new_capsule_collider_arguments[3], 1.2)
 
   luaunit.assert_equals(controller.world, world)
   luaunit.assert_equals(controller.yaw, 0)
@@ -387,7 +335,7 @@ function TestFPController.test_constructor_with_custom_options()
   local collider = MockCollider:new()
   local world = MockWorld:new(collider)
   local controller = FPController:new(world, {
-    x = 1, y = 2, z = 3,
+    position = vector(1, 2, 3),
     yaw = 5 * math.pi, pitch = -1, max_pitch = 0.5,
     mouse_sensitivity = 0.01, mouse_y_inverted = true,
     radius = 0.25, height = 1.75, eye_height = 1.4,
@@ -406,7 +354,11 @@ function TestFPController.test_constructor_with_custom_options()
   luaunit.assert_equals({collider:getPosition()}, {1, 2, 3})
   luaunit.assert_equals(collider.radius, 0.25)
   luaunit.assert_equals(collider.length, 1.25)
-  luaunit.assert_equals(collider.shape.offset, {0, 0, 0, math.pi / 2, 1, 0, 0})
+  luaunit.assert_equals(collider.shape.offset_position, vector.zero)
+  luaunit.assert_equals(
+    collider.shape.offset_orientation,
+    quaternion.angleaxis(math.pi / 2, 1, 0, 0)
+  )
   luaunit.assert_equals(collider.tag, "hero")
   luaunit.assert_equals(collider.configured_mass, 80)
   luaunit.assert_equals(collider.friction, 0.2)
@@ -415,11 +367,9 @@ function TestFPController.test_constructor_with_custom_options()
   luaunit.assert_false(collider.sleeping_allowed)
   luaunit.assert_equals(collider.degrees_of_freedom, {"xyz", ""})
 
-  luaunit.assert_equals(
-    {table.unpack(world.new_capsule_collider_arguments, 1, 4)},
-    {1, 2, 3, 0.25}
-  )
-  luaunit.assert_almost_equals(world.new_capsule_collider_arguments[5], 1.25)
+  luaunit.assert_equals(world.new_capsule_collider_arguments[1], vector(1, 2, 3))
+  luaunit.assert_equals(world.new_capsule_collider_arguments[2], 0.25)
+  luaunit.assert_almost_equals(world.new_capsule_collider_arguments[3], 1.25)
 
   luaunit.assert_equals(controller.world, world)
   luaunit.assert_almost_equals(controller.yaw, math.pi, 1e-9)
@@ -454,14 +404,12 @@ end
 function TestFPController.test_get_camera_position()
   local world = MockWorld:new(MockCollider:new())
   local controller = FPController:new(world, {
-    x = 4, y = 5, z = 6,
+    position = vector(4, 5, 6),
     height = 2, eye_height = 1.6,
   })
-  local x, y, z = controller:get_camera_position()
+  local position = controller:get_camera_position()
 
-  luaunit.assert_equals(x, 4)
-  luaunit.assert_almost_equals(y, 5.6, 1e-9)
-  luaunit.assert_equals(z, 6)
+  luaunit.assert_equals(position, vector(4, 5.6, 6))
 end
 
 function TestFPController.test_get_camera_orientation()
@@ -471,7 +419,7 @@ function TestFPController.test_get_camera_orientation()
   })
   local orientation = controller:get_camera_orientation()
 
-  local x, y, z = rotation.rotate_vector(orientation, 0, 0, -1)
+  local x, y, z = (orientation * vector.forward):unpack()
 
   luaunit.assert_almost_equals(x, math.cos(math.pi / 6), 1e-9)
   luaunit.assert_almost_equals(y, 0.5, 1e-9)
@@ -483,31 +431,11 @@ function TestFPController.test_get_camera_direction()
   local controller = FPController:new(world, {
     yaw = math.pi / 2, pitch = math.pi / 6,
   })
-  local x, y, z = controller:get_camera_direction()
+  local direction = controller:get_camera_direction()
 
-  luaunit.assert_almost_equals(x, math.cos(math.pi / 6), 1e-9)
-  luaunit.assert_almost_equals(y, 0.5, 1e-9)
-  luaunit.assert_almost_equals(z, 0, 1e-9)
-end
-
-function TestFPController.test_get_camera_view_pose()
-  local world = MockWorld:new(MockCollider:new())
-  local controller = FPController:new(world, {
-    x = 1, y = 2, z = 3,
-    yaw = math.pi / 2,
-    height = 2, eye_height = 1.5,
-  })
-
-  local matrix = MockMatrix:new()
-  _G.lovr = { math = { newMat4 = function() return matrix end } }
-
-  local actual_matrix = controller:get_camera_view_pose()
-
-  luaunit.assert_equals(actual_matrix, matrix)
-  luaunit.assert_equals(actual_matrix.from, {1, 2.5, 3})
-  luaunit.assert_almost_equals(actual_matrix.to[1], 2, 1e-9)
-  luaunit.assert_almost_equals(actual_matrix.to[2], 2.5, 1e-9)
-  luaunit.assert_almost_equals(actual_matrix.to[3], 3, 1e-9)
+  luaunit.assert_almost_equals(direction.x, math.cos(math.pi / 6), 1e-9)
+  luaunit.assert_almost_equals(direction.y, 0.5, 1e-9)
+  luaunit.assert_almost_equals(direction.z, 0, 1e-9)
 end
 
 function TestFPController.test_apply_mouse_move_wraps_yaw_and_clamps_pitch()
@@ -539,7 +467,7 @@ end
 
 function TestFPController.test_teleport()
   local collider = MockCollider:new()
-  collider:setLinearVelocity(1, 2, 3)
+  collider:setLinearVelocity(vector(1, 2, 3))
 
   local world = MockWorld:new(collider)
   world.raycast_results = {_ground_hit()}
@@ -550,7 +478,7 @@ function TestFPController.test_teleport()
   local is_grounded = controller:is_grounded()
   luaunit.assert_true(is_grounded)
 
-  controller:teleport(4, 5, 6)
+  controller:teleport(vector(4, 5, 6))
 
   luaunit.assert_equals({collider:getPosition()}, {4, 5, 6})
   luaunit.assert_equals({collider:getLinearVelocity()}, {0, 0, 0})
@@ -566,7 +494,7 @@ function TestFPController.test_is_grounded_queries_below_capsule_and_exposes_hit
   world.raycast_results = {_ground_hit({ collider = ground_collider, shape = ground_shape })}
 
   local controller = FPController:new(world, {
-    x = 1, y = 2, z = 3,
+    position = vector(1, 2, 3),
     ground_tolerance = 0.1, contact_tolerance = 0.02,
     ground_filter = "walkable",
   })
@@ -574,7 +502,10 @@ function TestFPController.test_is_grounded_queries_below_capsule_and_exposes_hit
   local is_grounded = controller:is_grounded()
 
   luaunit.assert_true(is_grounded)
-  luaunit.assert_equals(world.raycast_calls[1], {1, 1.12, 3, 1, 1, 3, "walkable"})
+  luaunit.assert_equals(
+    world.raycast_calls[1],
+    {vector(1, 1.12, 3), vector(1, 1, 3), "walkable"}
+  )
   luaunit.assert_equals(controller.ground_collider, ground_collider)
   luaunit.assert_equals(controller.ground_shape, ground_shape)
 end
@@ -582,8 +513,8 @@ end
 function TestFPController.test_is_grounded_rejects_invalid_hits_and_clears_previous_hit()
   local world = MockWorld:new(MockCollider:new())
   world.raycast_results = {
-    _ground_hit({ normal_y = math.cos(math.rad(9)) }),
-    _ground_hit({ normal_y = math.cos(math.rad(11)) }),
+    _ground_hit({ normal = vector(0, math.cos(math.rad(9)), 0) }),
+    _ground_hit({ normal = vector(0, math.cos(math.rad(11)), 0) }),
     {true, true, 0, 0, 0, 0},
     false,
   }
@@ -620,9 +551,9 @@ function TestFPController.test_walking_rotates_local_input_by_yaw()
 
   controller:pre_physics_update(1, 0, -1)
 
-  luaunit.assert_almost_equals(collider.force_x, 40, 1e-9)
-  luaunit.assert_equals(collider.force_y, 0)
-  luaunit.assert_almost_equals(collider.force_z, 0, 1e-9)
+  luaunit.assert_almost_equals(collider.force.x, 40, 1e-9)
+  luaunit.assert_almost_equals(collider.force.y, 0, 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, 0, 1e-9)
 end
 
 function TestFPController.test_walking_preserves_analog_magnitude_and_clamps_diagonal_input()
@@ -636,13 +567,12 @@ function TestFPController.test_walking_preserves_analog_magnitude_and_clamps_dia
   world.raycast_results = {_ground_hit(), _ground_hit()}
 
   controller:pre_physics_update(1, 0.5, 0)
-  luaunit.assert_almost_equals(collider.force_x, 20, 1e-9)
-  luaunit.assert_almost_equals(collider.force_z, 0, 1e-9)
+  luaunit.assert_equals(collider.force, vector(20, 0, 0))
 
-  collider:setLinearVelocity(0, 0, 0)
+  collider:setLinearVelocity(vector.zero)
   controller:pre_physics_update(1, 1, -1)
-  luaunit.assert_almost_equals(collider.force_x, 40 / math.sqrt(2), 1e-9)
-  luaunit.assert_almost_equals(collider.force_z, -40 / math.sqrt(2), 1e-9)
+  luaunit.assert_almost_equals(collider.force.x, 40 / math.sqrt(2), 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, -40 / math.sqrt(2), 1e-9)
 end
 
 function TestFPController.test_walking_limits_acceleration_and_brakes_without_input()
@@ -657,18 +587,18 @@ function TestFPController.test_walking_limits_acceleration_and_brakes_without_in
   })
 
   controller:pre_physics_update(0.1, 0, -1)
-  luaunit.assert_almost_equals(collider.force_z, -30, 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, -30, 1e-9)
 
-  collider:setLinearVelocity(4, 0, -3)
+  collider:setLinearVelocity(vector(4, 0, -3))
   controller:pre_physics_update(1, 0, 0)
-  luaunit.assert_almost_equals(collider.force_x, -24, 1e-9)
-  luaunit.assert_almost_equals(collider.force_z, 18, 1e-9)
+  luaunit.assert_almost_equals(collider.force.x, -24, 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, 18, 1e-9)
   luaunit.assert_equals(#world.shapecast_calls, 1)
 end
 
 function TestFPController.test_airborne_controller_preserves_horizontal_momentum()
   local collider = MockCollider:new()
-  collider:setLinearVelocity(1, -2, 3)
+  collider:setLinearVelocity(vector(1, -2, 3))
 
   local world = MockWorld:new(collider)
   world.raycast_results = {false, false}
@@ -692,10 +622,10 @@ function TestFPController.test_near_ground_controller_can_move_but_does_not_step
 
   controller:pre_physics_update(0.1, 0, -1)
 
-  luaunit.assert_true(collider.force_z < 0)
+  luaunit.assert_true(collider.force.z < 0)
   luaunit.assert_equals(#world.raycast_calls, 2)
-  luaunit.assert_equals(world.raycast_calls[1][5], -0.98)
-  luaunit.assert_almost_equals(world.raycast_calls[2][5], -1.16, 1e-9)
+  luaunit.assert_equals(world.raycast_calls[1][2].y, -0.98)
+  luaunit.assert_almost_equals(world.raycast_calls[2][2].y, -1.16, 1e-9)
 end
 
 function TestFPController.test_speed_scale_changes_desired_walking_speed()
@@ -710,7 +640,7 @@ function TestFPController.test_speed_scale_changes_desired_walking_speed()
 
   controller:pre_physics_update(1, 0, -1)
 
-  luaunit.assert_almost_equals(collider.force_z, -20, 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, -20, 1e-9)
 end
 
 -- TestFPController / Dynamic-body push limiting
@@ -721,7 +651,7 @@ function TestFPController.test_walking_shapecasts_predicted_displacement_for_dyn
   world.raycast_results = {_ground_hit()}
 
   local controller = FPController:new(world, {
-    x = 1, y = 2, z = 3,
+    position = vector(1, 2, 3),
     mass = 10,
     speed = 4, max_acceleration = 100,
     max_step_height = 0,
@@ -735,19 +665,24 @@ function TestFPController.test_walking_shapecasts_predicted_displacement_for_dyn
 
   local arguments = world.shapecast_calls[1]
   luaunit.assert_equals(arguments[1], collider.shape)
-  luaunit.assert_equals({table.unpack(arguments, 2, 4)}, {1, 2, 3})
-  luaunit.assert_almost_equals(arguments[5], 1, 1e-9)
-  luaunit.assert_equals(arguments[6], 2)
-  luaunit.assert_almost_equals(arguments[7], 0.9, 1e-9)
-  luaunit.assert_equals({table.unpack(arguments, 8, 11)}, {math.pi / 2, 1, 0, 0})
-  luaunit.assert_equals(arguments[12], "pushable")
+  luaunit.assert_equals(arguments[2], vector(1, 2, 3))
+  luaunit.assert_almost_equals(arguments[3].x, 1, 1e-9)
+  luaunit.assert_equals(arguments[3].y, 2)
+  luaunit.assert_almost_equals(arguments[3].z, 0.9, 1e-9)
+  luaunit.assert_equals(arguments[4], quaternion.angleaxis(math.pi / 2, 1, 0, 0))
+  luaunit.assert_equals(arguments[5], "pushable")
 end
 
 function TestFPController.test_walking_limits_normal_push_force_and_preserves_tangent_force()
   local collider, dynamic_collider = MockCollider:new(), MockCollider:new()
   local world = MockWorld:new(collider)
   world.raycast_results = {_ground_hit()}
-  world.shapecast_results = {_dynamic_hit(dynamic_collider, { x = 1, y = 2, z = 3, normal_z = 1 })}
+  world.shapecast_results = {
+    _dynamic_hit(dynamic_collider, {
+      position = vector(1, 2, 3),
+      normal = vector.backward,
+    }),
+  }
 
   local controller = FPController:new(world, {
     mass = 10,
@@ -758,14 +693,14 @@ function TestFPController.test_walking_limits_normal_push_force_and_preserves_ta
 
   controller:pre_physics_update(0.5, 1, -1)
 
-  luaunit.assert_almost_equals(collider.force_x, 80 / math.sqrt(2), 1e-9)
-  luaunit.assert_almost_equals(collider.force_z, -25, 1e-9)
-  luaunit.assert_equals(dynamic_collider.velocity_point, {1, 2, 3})
+  luaunit.assert_almost_equals(collider.force.x, 80 / math.sqrt(2), 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, -25, 1e-9)
+  luaunit.assert_equals(dynamic_collider.velocity_point, vector(1, 2, 3))
 end
 
 function TestFPController.test_walking_does_not_limit_push_when_body_moves_away()
   local collider, dynamic_collider = MockCollider:new(), MockCollider:new()
-  dynamic_collider.surface_velocity_z = -5
+  dynamic_collider.surface_velocity = vector(0, 0, -5)
 
   local world = MockWorld:new(collider)
   world.raycast_results = {_ground_hit()}
@@ -780,14 +715,16 @@ function TestFPController.test_walking_does_not_limit_push_when_body_moves_away(
 
   controller:pre_physics_update(0.5, 0, -1)
 
-  luaunit.assert_almost_equals(collider.force_z, -80, 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, -80, 1e-9)
 end
 
 function TestFPController.test_walking_ignores_hit_without_horizontal_normal()
   local collider = MockCollider:new()
   local world = MockWorld:new(collider)
   world.raycast_results = {_ground_hit()}
-  world.shapecast_results = {_dynamic_hit(MockCollider:new(), { normal_y = 1, normal_z = 0 })}
+  world.shapecast_results = {
+    _dynamic_hit(MockCollider:new(), { normal = vector.up }),
+  }
 
   local controller = FPController:new(world, {
     mass = 10,
@@ -798,7 +735,7 @@ function TestFPController.test_walking_ignores_hit_without_horizontal_normal()
 
   controller:pre_physics_update(0.5, 0, -1)
 
-  luaunit.assert_almost_equals(collider.force_z, -80, 1e-9)
+  luaunit.assert_almost_equals(collider.force.z, -80, 1e-9)
 end
 
 -- TestFPController / Automatic step-up
@@ -806,20 +743,20 @@ end
 function TestFPController.test_walking_steps_onto_clear_walkable_surface()
   local collider = MockCollider:new()
   local world = MockWorld:new(collider)
-  world.raycast_results = {_ground_hit(), _ground_hit({ y = 0.2 })}
+  world.raycast_results = {_ground_hit(), _ground_hit({ position = vector(0, 0.2, 0) })}
 
   local controller = FPController:new(world, {
-    y = 0.9,
+    position = vector(0, 0.9, 0),
     max_acceleration = 100,
   })
 
   controller:pre_physics_update(0.1, 0, -1)
 
-  luaunit.assert_almost_equals(collider.y, 1.11, 1e-9)
+  luaunit.assert_almost_equals(collider.position.y, 1.11, 1e-9)
   luaunit.assert_equals(#world.overlap_calls, 1)
   luaunit.assert_equals(world.overlap_calls[1][1], collider.shape)
-  luaunit.assert_almost_equals(world.overlap_calls[1][3], 1.11, 1e-9)
-  luaunit.assert_equals(world.overlap_calls[1][10], controller.obstruction_filter)
+  luaunit.assert_almost_equals(world.overlap_calls[1][2].y, 1.11, 1e-9)
+  luaunit.assert_equals(world.overlap_calls[1][5], controller.obstruction_filter)
 end
 
 function TestFPController.test_step_search_uses_direction_distance_and_step_filter()
@@ -827,7 +764,7 @@ function TestFPController.test_step_search_uses_direction_distance_and_step_filt
   world.raycast_results = {_ground_hit(), false}
 
   local controller = FPController:new(world, {
-    x = 1, y = 2, z = 3,
+    position = vector(1, 2, 3),
     radius = 0.3,
     max_acceleration = 100,
     max_step_height = 0.25, step_search_distance = 0.2,
@@ -837,28 +774,35 @@ function TestFPController.test_step_search_uses_direction_distance_and_step_filt
 
   controller:pre_physics_update(0.1, 1, 0)
 
-  luaunit.assert_equals(world.raycast_calls[2], {1.5, 1.36, 3, 1.5, 1.02, 3, "stairs"})
+  luaunit.assert_equals(world.raycast_calls[2], {
+    vector(1.5, 1.36, 3),
+    vector(1.5, 1.02, 3),
+    "stairs",
+  })
 end
 
 function TestFPController.test_walking_does_not_step_onto_invalid_surface()
   for _, case in ipairs({
     { name = "missing", hit = false },
-    { name = "steep", hit = _ground_hit({ y = 0.2, normal_y = 0 }) },
-    { name = "too low", hit = _ground_hit({ y = 0.005 }) },
-    { name = "too high", hit = _ground_hit({ y = 0.3 }) },
+    { name = "steep", hit = _ground_hit({
+      position = vector(0, 0.2, 0),
+      normal = vector.zero,
+    }) },
+    { name = "too low", hit = _ground_hit({ position = vector(0, 0.005, 0) }) },
+    { name = "too high", hit = _ground_hit({ position = vector(0, 0.3, 0) }) },
   }) do
     local collider = MockCollider:new()
     local world = MockWorld:new(collider)
     world.raycast_results = {_ground_hit(), case.hit}
 
     local controller = FPController:new(world, {
-      y = 0.9,
+      position = vector(0, 0.9, 0),
       max_acceleration = 100,
     })
 
     controller:pre_physics_update(0.1, 0, -1)
 
-    luaunit.assert_equals(collider.y, 0.9, case.name)
+    luaunit.assert_equals(collider.position.y, 0.9, case.name)
     luaunit.assert_equals(#world.overlap_calls, 0, case.name)
   end
 end
@@ -866,17 +810,17 @@ end
 function TestFPController.test_walking_does_not_step_into_obstruction()
   local collider = MockCollider:new()
   local world = MockWorld:new(collider)
-  world.raycast_results = {_ground_hit(), _ground_hit({ y = 0.2 })}
+  world.raycast_results = {_ground_hit(), _ground_hit({ position = vector(0, 0.2, 0) })}
   world.overlap_results = {{}}
 
   local controller = FPController:new(world, {
-    y = 0.9,
+    position = vector(0, 0.9, 0),
     max_acceleration = 100,
   })
 
   controller:pre_physics_update(0.1, 0, -1)
 
-  luaunit.assert_equals(collider.y, 0.9)
+  luaunit.assert_equals(collider.position.y, 0.9)
 end
 
 function TestFPController.test_zero_maximum_step_height_disables_step_search()

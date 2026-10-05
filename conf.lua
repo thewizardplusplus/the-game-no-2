@@ -3,6 +3,7 @@ local require_paths =
 lovr.filesystem.setRequirePath(table.concat(require_paths, ";"))
 
 local assertions = require("luatypechecks.assertions")
+local tests = require("constants.tests")
 
 local function _set_title(config, title)
   assertions.is_table(config)
@@ -29,6 +30,16 @@ function lovr.conf(config)
   -- this is a flatscreen game; the headset simulator otherwise owns the
   -- mouse mode and only captures it while the left button is held
   config.modules.headset = false
+
+  if os.getenv(tests.TEST_ENVIRONMENT_VARIABLE) ~= nil then
+    for module_name in pairs(config.modules) do
+      config.modules[module_name] = tests.TEST_MODULES[module_name] or false
+    end
+
+    config.window = nil
+    return
+  end
+
   config.window.resizable = true
 
   _set_title(config, "The Game No. 2")

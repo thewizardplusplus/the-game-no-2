@@ -19,11 +19,10 @@
 local middleclass = require("middleclass")
 local assertions = require("luatypechecks.assertions")
 local checks = require("luatypechecks.checks")
-local rotation = require("pkg.fpcontroller.utils.rotation")
-local vector = require("pkg.fpcontroller.utils.vector")
 local utils = require("pkg.fpcontroller.utils")
+local vectorutils = require("pkg.fpcontroller.utils.vector")
 
-local _CAPSULE_ANGLE, _CAPSULE_AXIS_X, _CAPSULE_AXIS_Y, _CAPSULE_AXIS_Z = math.pi / 2, 1, 0, 0
+local _CAPSULE_ORIENTATION = quaternion.angleaxis(math.pi / 2, 1, 0, 0)
 local _MIN_VELOCITY_CORRECTION_TIME = 1 / 120
 local _MIN_PREDICTED_DISPLACEMENT = 1e-6 -- meters
 local _MIN_HORIZONTAL_NORMAL_LENGTH = 1e-6 -- dimensionless
@@ -63,9 +62,7 @@ local FPController = middleclass("FPController")
 -- @function new
 -- @tparam World world physics world in which the controller will live
 -- @tparam[opt={}] table options controller settings
--- @tparam[opt=0] number options.x initial X coordinate
--- @tparam[opt=0] number options.y initial capsule center Y coordinate
--- @tparam[opt=0] number options.z initial Z coordinate
+-- @tparam[opt=vector.zero] vector options.position initial capsule center position
 -- @tparam[opt=0] number options.yaw initial horizontal view angle
 -- @tparam[opt=0] number options.pitch initial vertical view angle
 -- @tparam[opt=math.rad(89)] number options.max_pitch maximum absolute vertical view angle
@@ -96,9 +93,7 @@ function FPController:initialize(world, options)
   assertions.is_table_or_nil(options)
 
   options = utils.shallow_copy(options or {})
-  options.x = options.x or 0
-  options.y = options.y or 0
-  options.z = options.z or 0
+  options.position = options.position or vector.zero
   options.yaw = options.yaw or 0
   options.pitch = options.pitch or 0
   options.max_pitch = options.max_pitch or math.rad(89)
@@ -125,9 +120,7 @@ function FPController:initialize(world, options)
   options.obstruction_filter =
     options.obstruction_filter or string.format("~%s ~trigger ~held", options.tag)
 
-  assertions.is_number(options.x)
-  assertions.is_number(options.y)
-  assertions.is_number(options.z)
+  assertions.is_table(options.position)
   assertions.is_number(options.yaw)
   assertions.is_number(options.pitch)
   assertions.is_number(options.max_pitch)
@@ -154,15 +147,13 @@ function FPController:initialize(world, options)
   assertions.is_string(options.obstruction_filter)
 
   local collider = world:newCapsuleCollider(
-    options.x, options.y, options.z,
-    options.radius, options.height - 2 * options.radius
+    options.position,
+    options.radius,
+    options.height - 2 * options.radius
   )
   -- LÖVR capsules are aligned with the Z axis. Rotate the shape itself so
   -- the long axis is vertical while the collider remains rotation-locked.
-  collider:getShape():setOffset(
-    0, 0, 0,
-    _CAPSULE_ANGLE, _CAPSULE_AXIS_X, _CAPSULE_AXIS_Y, _CAPSULE_AXIS_Z
-  )
+  collider:getShape():setOffset(vector.zero, _CAPSULE_ORIENTATION)
   collider:setTag(options.tag)
   collider:setMass(options.mass)
   collider:setFriction(options.friction)
@@ -200,36 +191,24 @@ function FPController:initialize(world, options)
 end
 
 ---
--- @treturn number camera X coordinate
--- @treturn number camera Y coordinate
--- @treturn number camera Z coordinate
+-- @treturn vector camera position
 function FPController:get_camera_position()
-  local x, y, z = self.collider:getPosition()
-  return x, y - self.height / 2 + self.eye_height, z
+  local position = vector(self.collider:getPosition())
+  return position + vector(0, self.eye_height - self.height / 2, 0)
 end
 
 ---
--- @treturn table unit quaternion
+-- @treturn quaternion camera orientation
 function FPController:get_camera_orientation()
-  local yaw_orientation = rotation.from_angle_and_axis(-self.yaw, 0, 1, 0)
-  local pitch_orientation = rotation.from_angle_and_axis(self.pitch, 1, 0, 0)
-  return rotation.multiply(yaw_orientation, pitch_orientation)
+  local yaw_orientation = quaternion.angleaxis(-self.yaw, 0, 1, 0)
+  local pitch_orientation = quaternion.angleaxis(self.pitch, 1, 0, 0)
+  return yaw_orientation * pitch_orientation
 end
 
 ---
--- @treturn number normalized view direction X component
--- @treturn number normalized view direction Y component
--- @treturn number normalized view direction Z component
+-- @treturn vector normalized view direction
 function FPController:get_camera_direction()
-  return rotation.to_camera_direction(self:get_camera_orientation())
-end
-
----
--- @treturn Mat4 camera view pose
-function FPController:get_camera_view_pose()
-  local x, y, z = self:get_camera_position()
-  local dx, dy, dz = self:get_camera_direction()
-  return lovr.math.newMat4():lookAt({x, y, z}, {x + dx, y + dy, z + dz})
+  return self:get_camera_orientation():direction()
 end
 
 ---
@@ -242,8 +221,7 @@ function FPController:is_grounded()
     collider ~= nil and normal_y ~= nil and normal_y >= math.cos(self.max_floor_angle)
 
   if is_grounded then
-    self.ground_collider = collider
-    self.ground_shape = shape
+    self.ground_collider, self.ground_shape = collider, shape
   else
     self:_clear_ground_hit()
   end
@@ -277,27 +255,17 @@ function FPController:pre_physics_update(dt, input_x, input_z)
     end
   end
 
+  local input = vector(input_x, 0, input_z)
   -- preserve analog input magnitude; only clamp vectors longer than one
-  local limited_input_x, _, limited_input_z = vector.limit_length(input_x, 0, input_z, 1)
-  input_x, input_z = limited_input_x, limited_input_z
+  input = vectorutils.limit_length(input, 1)
 
-  local sin_yaw, cos_yaw = math.sin(self.yaw), math.cos(self.yaw)
-  local direction_x = input_x * cos_yaw - input_z * sin_yaw
-  local direction_z = input_x * sin_yaw + input_z * cos_yaw
-
-  local normalized_direction_x, normalized_direction_z
-  local has_input = input_x ~= 0 or input_z ~= 0
-  if has_input then
-    local direction_length = vector.length(direction_x, 0, direction_z)
-    normalized_direction_x = direction_x / direction_length
-    normalized_direction_z = direction_z / direction_length
-  end
-
-  local force_x, force_z = self:_calculate_horizontal_force(dt, direction_x, direction_z, has_input)
-  self.collider:applyForce(force_x, 0, force_z)
+  local direction = quaternion.angleaxis(-self.yaw, 0, 1, 0) * input
+  local has_input = input.x ~= 0 or input.z ~= 0
+  local force = self:_calculate_horizontal_force(dt, direction, has_input)
+  self.collider:applyForce(force)
 
   if has_input then
-    self:_try_step(normalized_direction_x, normalized_direction_z, is_grounded)
+    self:_try_step(direction:normalize(), is_grounded)
   end
 end
 
@@ -318,16 +286,12 @@ end
 
 ---
 -- ⚠️. Move the controller immediately and discard its linear momentum.
--- @tparam number x target X coordinate
--- @tparam number y target capsule center Y coordinate
--- @tparam number z target Z coordinate
-function FPController:teleport(x, y, z)
-  assertions.is_number(x)
-  assertions.is_number(y)
-  assertions.is_number(z)
+-- @tparam vector position target capsule center position
+function FPController:teleport(position)
+  assertions.is_table(position)
 
-  self.collider:setPosition(x, y, z)
-  self.collider:setLinearVelocity(0, 0, 0)
+  self.collider:setPosition(position)
+  self.collider:setLinearVelocity(vector.zero)
   self:_clear_ground_hit()
 end
 
@@ -338,128 +302,116 @@ end
 function FPController:_get_ground_hit_within(distance)
   assertions.is_number(distance)
 
-  local x, y, z = self.collider:getPosition()
-  local bottom = y - self.height / 2
-  return self.world:raycast(
-    x, bottom + self.contact_tolerance, z,
-    x, bottom - distance, z,
-    self.ground_filter
-  )
+  local bottom_position = vector(self.collider:getPosition()) - vector(0, self.height / 2, 0)
+  local cast_start = bottom_position + vector(0, self.contact_tolerance, 0)
+  local cast_finish = bottom_position - vector(0, distance, 0)
+  return self.world:raycast(cast_start, cast_finish, self.ground_filter)
 end
 
-function FPController:_calculate_horizontal_force(dt, direction_x, direction_z, has_input)
+function FPController:_calculate_horizontal_force(dt, direction, has_input)
   assertions.is_number(dt)
-  assertions.is_number(direction_x)
-  assertions.is_number(direction_z)
+  assertions.is_table(direction)
   assertions.is_boolean(has_input)
 
   local effective_speed = self.speed * self.speed_scale
-  local desired_velocity_x, desired_velocity_z =
-    direction_x * effective_speed, direction_z * effective_speed
+  local desired_velocity = direction * effective_speed
   local velocity_x, _, velocity_z = self.collider:getLinearVelocity()
+  local velocity = vector(velocity_x, 0, velocity_z)
   local velocity_correction_time = math.max(dt, _MIN_VELOCITY_CORRECTION_TIME)
-  local force_x = (desired_velocity_x - velocity_x) * self.mass / velocity_correction_time
-  local force_z = (desired_velocity_z - velocity_z) * self.mass / velocity_correction_time
+  local force = (desired_velocity - velocity) * self.mass / velocity_correction_time
+
   local maximum_force = self.mass * self.max_acceleration
-  local limited_force_x, _, limited_force_z =
-    vector.limit_length(force_x, 0, force_z, maximum_force)
-  force_x, force_z = limited_force_x, limited_force_z
+  force = vectorutils.limit_length(force, maximum_force)
 
   if not has_input then
-    return force_x, force_z
+    return force
   end
 
-  return self:_limit_push_force(dt, velocity_x, velocity_z, force_x, force_z)
+  return self:_limit_push_force(dt, velocity, force)
 end
 
-function FPController:_limit_push_force(dt, velocity_x, velocity_z, force_x, force_z)
+function FPController:_limit_push_force(dt, velocity, force)
   assertions.is_number(dt)
-  assertions.is_number(velocity_x)
-  assertions.is_number(velocity_z)
-  assertions.is_number(force_x)
-  assertions.is_number(force_z)
+  assertions.is_table(velocity)
+  assertions.is_table(force)
 
-  local predicted_velocity_x = velocity_x + force_x / self.mass * dt
-  local predicted_velocity_z = velocity_z + force_z / self.mass * dt
-  local predicted_displacement_x = predicted_velocity_x * dt
-  local predicted_displacement_z = predicted_velocity_z * dt
-  local predicted_displacement_length =
-    vector.length(predicted_displacement_x, 0, predicted_displacement_z)
+  local predicted_velocity = velocity + force / self.mass * dt
+  local predicted_displacement = predicted_velocity * dt
+  local predicted_displacement_length = predicted_displacement:length()
   if predicted_displacement_length <= _MIN_PREDICTED_DISPLACEMENT then
-    return force_x, force_z
+    return force
   end
 
-  predicted_displacement_x = predicted_displacement_x
-    + predicted_displacement_x / predicted_displacement_length * self.contact_tolerance
-  predicted_displacement_z = predicted_displacement_z
-    + predicted_displacement_z / predicted_displacement_length * self.contact_tolerance
+  predicted_displacement = predicted_displacement
+    + predicted_displacement / predicted_displacement_length * self.contact_tolerance
 
-  local dynamic_collider, hit_x, hit_y, hit_z, normal_x, normal_z =
-    self:_get_dynamic_body_ahead(predicted_displacement_x, predicted_displacement_z)
-  if dynamic_collider == nil or normal_x == nil or normal_z == nil then
-    return force_x, force_z
+  local dynamic_collider, hit_position, normal =
+    self:_get_dynamic_body_ahead(predicted_displacement)
+  if dynamic_collider == nil or normal == nil then
+    return force
   end
 
-  local horizontal_normal_length = vector.length(normal_x, 0, normal_z)
+  local horizontal_normal = vector(normal.x, 0, normal.z)
+  local horizontal_normal_length = horizontal_normal:length()
   if horizontal_normal_length <= _MIN_HORIZONTAL_NORMAL_LENGTH then
-    return force_x, force_z
+    return force
   end
 
-  normal_x = normal_x / horizontal_normal_length
-  normal_z = normal_z / horizontal_normal_length
+  horizontal_normal = horizontal_normal:normalize()
 
   local surface_velocity_x, _, surface_velocity_z =
-    dynamic_collider:getLinearVelocityFromWorldPoint(hit_x, hit_y, hit_z)
+    dynamic_collider:getLinearVelocityFromWorldPoint(hit_position)
+  local surface_velocity = vector(surface_velocity_x, 0, surface_velocity_z)
   local relative_velocity_along_normal =
-    (predicted_velocity_x - surface_velocity_x) * normal_x
-    + (predicted_velocity_z - surface_velocity_z) * normal_z
+    (predicted_velocity - surface_velocity):dot(horizontal_normal)
   if relative_velocity_along_normal >= 0 then
-    return force_x, force_z
+    return force
   end
 
-  local force_along_normal = force_x * normal_x + force_z * normal_z
+  local force_along_normal = force:dot(horizontal_normal)
   if force_along_normal >= -self.max_push_force then
-    return force_x, force_z
+    return force
   end
 
   local correction = -self.max_push_force - force_along_normal
-  return force_x + normal_x * correction, force_z + normal_z * correction
+  return force + horizontal_normal * correction
 end
 
-function FPController:_get_dynamic_body_ahead(displacement_x, displacement_z)
-  assertions.is_number(displacement_x)
-  assertions.is_number(displacement_z)
+function FPController:_get_dynamic_body_ahead(displacement)
+  assertions.is_table(displacement)
 
-  local x, y, z = self.collider:getPosition()
+  local cast_start = vector(self.collider:getPosition())
+  local cast_finish = cast_start + displacement
   local collider, _, hit_x, hit_y, hit_z, normal_x, _, normal_z = self.world:shapecast(
     self.collider:getShape(),
-    x, y, z,
-    x + displacement_x, y, z + displacement_z,
-    _CAPSULE_ANGLE, _CAPSULE_AXIS_X, _CAPSULE_AXIS_Y, _CAPSULE_AXIS_Z,
+    cast_start,
+    cast_finish,
+    _CAPSULE_ORIENTATION,
     self.push_limit_filter
   )
-  return collider, hit_x, hit_y, hit_z, normal_x, normal_z
+  local hit_position =
+    (hit_x ~= nil and hit_y ~= nil and hit_z ~= nil) and vector(hit_x, hit_y, hit_z) or nil
+  local normal = (normal_x ~= nil and normal_z ~= nil) and vector(normal_x, 0, normal_z) or nil
+  return collider, hit_position, normal
 end
 
-function FPController:_try_step(direction_x, direction_z, is_grounded)
-  assertions.is_number(direction_x)
-  assertions.is_number(direction_z)
+function FPController:_try_step(direction, is_grounded)
+  assertions.is_table(direction)
   assertions.is_boolean(is_grounded)
 
   if self.max_step_height == 0 or not is_grounded then
     return
   end
 
-  local x, y, z = self.collider:getPosition()
+  local position = vector(self.collider:getPosition())
   local distance = self.radius + self.step_search_distance
-  local ahead_x, ahead_z = x + direction_x * distance, z + direction_z * distance
-  local bottom = y - self.height / 2
-  local step_search_height = self.max_step_height + self.contact_tolerance
-  local collider, _, _, hit_y, _, _, normal_y = self.world:raycast(
-    ahead_x, bottom + step_search_height, ahead_z,
-    ahead_x, bottom - self.ground_tolerance, ahead_z,
-    self.step_filter
-  )
+  local ahead = position + direction * distance
+  local bottom = position.y - self.height / 2
+  local cast_origin = vector(ahead.x, bottom, ahead.z)
+  local cast_start = cast_origin + vector(0, self.max_step_height + self.contact_tolerance, 0)
+  local cast_finish = cast_origin - vector(0, self.ground_tolerance, 0)
+  local collider, _, _, hit_y, _, _, normal_y =
+    self.world:raycast(cast_start, cast_finish, self.step_filter)
   if collider == nil or normal_y == nil or normal_y < math.cos(self.max_floor_angle) then
     return
   end
@@ -469,16 +421,16 @@ function FPController:_try_step(direction_x, direction_z, is_grounded)
     return
   end
 
-  local target_y = y + rise + self.contact_tolerance
+  local target_position = position + vector(0, rise + self.contact_tolerance, 0)
   local obstruction = self.world:overlapShape(
     self.collider:getShape(),
-    x, target_y, z,
-    _CAPSULE_ANGLE, _CAPSULE_AXIS_X, _CAPSULE_AXIS_Y, _CAPSULE_AXIS_Z,
+    target_position,
+    _CAPSULE_ORIENTATION,
     0, -- maximum distance
     self.obstruction_filter
   )
   if obstruction == nil then
-    self.collider:setPosition(x, target_y, z)
+    self.collider:setPosition(target_position)
   end
 end
 

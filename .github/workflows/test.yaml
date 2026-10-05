@@ -3,14 +3,23 @@ on: [push]
 jobs:
   test:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        luaVersion: ["5.1", "5.2", "5.3", "5.4", "5.5", "luajit"]
+    env:
+      LOVR_REPOSITORY: https://github.com/bjornbytes/lovr
+      LOVR_VERSION: 0.19.0
     steps:
       - uses: actions/checkout@v4
-      - uses: leafo/gh-actions-lua@v13
-        with:
-          luaVersion: ${{ matrix.luaVersion }}
-      - uses: leafo/gh-actions-luarocks@v6
+      - name: Install LÖVR
+        run: |
+          declare -r LOVR_APPIMAGE_FILE="lovr-v${LOVR_VERSION}-x86_64.AppImage"
+          declare -r LOVR_APPIMAGE_URL="$(
+            printf '%s/releases/download/v%s/%s' \
+              "$LOVR_REPOSITORY" \
+              "$LOVR_VERSION" \
+              "$LOVR_APPIMAGE_FILE"
+          )"
+
+          curl --fail --location --output lovr.AppImage "$LOVR_APPIMAGE_URL"
+          chmod +x lovr.AppImage
+          ./lovr.AppImage --appimage-extract
       - name: test
-        run: lua test.lua
+        run: LOVR_HEADLESS_TEST=TRUE ./squashfs-root/AppRun test.lua
