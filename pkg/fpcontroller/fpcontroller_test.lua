@@ -68,6 +68,13 @@ function MockCollider:applyForce(force)
   table.insert(self.applied_forces, force)
 end
 
+function MockCollider:applyLinearImpulse(impulse)
+  assertions.is_table(impulse)
+
+  self.impulse = impulse
+  self.velocity = self.velocity + impulse / self.configured_mass
+end
+
 function MockCollider:setContinuous(value)
   assertions.is_boolean(value)
 
@@ -315,6 +322,7 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_equals(controller.mass, 75)
   luaunit.assert_equals(controller.speed, 2.5)
   luaunit.assert_equals(controller.speed_scale, 1)
+  luaunit.assert_equals(controller.jump_speed, 5)
   luaunit.assert_equals(controller.max_acceleration, 12)
   luaunit.assert_equals(controller.max_push_force, 350)
   luaunit.assert_almost_equals(controller.max_floor_angle, math.rad(5))
@@ -329,6 +337,9 @@ function TestFPController.test_constructor_with_default_options()
   luaunit.assert_equals(controller.collider, collider)
   luaunit.assert_nil(controller.ground_collider)
   luaunit.assert_nil(controller.ground_shape)
+  luaunit.assert_false(controller.is_jump_in_progress)
+  luaunit.assert_false(controller.is_jump_takeoff_pending)
+  luaunit.assert_nil(controller.jump_horizontal_velocity)
 end
 
 function TestFPController.test_constructor_with_custom_options()
@@ -340,7 +351,8 @@ function TestFPController.test_constructor_with_custom_options()
     mouse_sensitivity = 0.01, mouse_y_inverted = true,
     radius = 0.25, height = 1.75, eye_height = 1.4,
     mass = 80, friction = 0.2,
-    speed = 4, speed_scale = 0.25, max_acceleration = 20, max_push_force = 100,
+    speed = 4, speed_scale = 0.25, jump_speed = 6,
+    max_acceleration = 20, max_push_force = 100,
     max_floor_angle = 0.2,
     max_step_height = 0.3, step_search_distance = 0.1,
     ground_tolerance = 0.04, contact_tolerance = 0.005,
@@ -383,6 +395,7 @@ function TestFPController.test_constructor_with_custom_options()
   luaunit.assert_equals(controller.mass, 80)
   luaunit.assert_equals(controller.speed, 4)
   luaunit.assert_equals(controller.speed_scale, 0.25)
+  luaunit.assert_equals(controller.jump_speed, 6)
   luaunit.assert_equals(controller.max_acceleration, 20)
   luaunit.assert_equals(controller.max_push_force, 100)
   luaunit.assert_equals(controller.max_floor_angle, 0.2)
@@ -397,6 +410,9 @@ function TestFPController.test_constructor_with_custom_options()
   luaunit.assert_equals(controller.collider, collider)
   luaunit.assert_nil(controller.ground_collider)
   luaunit.assert_nil(controller.ground_shape)
+  luaunit.assert_false(controller.is_jump_in_progress)
+  luaunit.assert_false(controller.is_jump_takeoff_pending)
+  luaunit.assert_nil(controller.jump_horizontal_velocity)
 end
 
 -- TestFPController / Camera and direct controls
@@ -463,6 +479,160 @@ function TestFPController.test_apply_mouse_move_can_invert_vertical_axis()
 
   luaunit.assert_almost_equals(controller.yaw, 0.2, 1e-9)
   luaunit.assert_almost_equals(controller.pitch, 0.3, 1e-9)
+end
+
+function TestFPController.test_vertical_jump_from_ground_preserves_horizontal_velocity()
+  local collider = MockCollider:new()
+  collider:setLinearVelocity(vector(1, -2, 3))
+
+  local world = MockWorld:new(collider)
+  world.raycast_results = {_ground_hit()}
+
+  local controller = FPController:new(world, { mass = 10, jump_speed = 6 })
+
+  local is_jumped = controller:jump()
+  luaunit.assert_true(is_jumped)
+
+  luaunit.assert_equals(collider.impulse, vector(0, 80, 0))
+  luaunit.assert_equals({collider:getLinearVelocity()}, {1, 6, 3})
+  luaunit.assert_nil(controller.ground_collider)
+  luaunit.assert_nil(controller.ground_shape)
+  luaunit.assert_true(controller.is_jump_in_progress)
+  luaunit.assert_true(controller.is_jump_takeoff_pending)
+  luaunit.assert_nil(controller.jump_horizontal_velocity)
+end
+
+function TestFPController.test_directional_jump_uses_yaw_speed_scale_and_analog_magnitude()
+  local collider = MockCollider:new()
+  collider:setLinearVelocity(vector(0, 1, -10))
+
+  local world = MockWorld:new(collider)
+  world.raycast_results = {_ground_hit()}
+
+  local controller = FPController:new(world, {
+    yaw = math.pi / 2,
+    mass = 10,
+    speed = 4, speed_scale = 0.5, jump_speed = 6,
+  })
+
+  local is_jumped = controller:jump(0, -0.5)
+  luaunit.assert_true(is_jumped)
+
+  luaunit.assert_almost_equals(collider.impulse.x, 10, 1e-9)
+  luaunit.assert_almost_equals(collider.impulse.y, 50, 1e-9)
+  luaunit.assert_almost_equals(collider.impulse.z, 100, 1e-9)
+  luaunit.assert_almost_equals(collider.velocity.x, 1, 1e-9)
+  luaunit.assert_almost_equals(collider.velocity.y, 6, 1e-9)
+  luaunit.assert_almost_equals(collider.velocity.z, 0, 1e-9)
+  luaunit.assert_almost_equals(controller.jump_horizontal_velocity.x, 1, 1e-9)
+  luaunit.assert_almost_equals(controller.jump_horizontal_velocity.y, 0, 1e-9)
+  luaunit.assert_almost_equals(controller.jump_horizontal_velocity.z, 0, 1e-9)
+end
+
+function TestFPController.test_directional_jump_clamps_diagonal_input()
+  local collider = MockCollider:new()
+  local world = MockWorld:new(collider)
+  world.raycast_results = {_ground_hit()}
+
+  local controller = FPController:new(world, {
+    mass = 10,
+    speed = 4, jump_speed = 6,
+  })
+
+  local is_jumped = controller:jump(1, -1)
+  luaunit.assert_true(is_jumped)
+
+  luaunit.assert_almost_equals(collider.velocity.x, 4 / math.sqrt(2), 1e-9)
+  luaunit.assert_almost_equals(collider.velocity.y, 6, 1e-9)
+  luaunit.assert_almost_equals(collider.velocity.z, -4 / math.sqrt(2), 1e-9)
+end
+
+function TestFPController.test_jump_uses_locked_takeoff_direction_while_ascending()
+  local collider = MockCollider:new()
+  local world = MockWorld:new(collider)
+  world.raycast_results = {_ground_hit(), false, false, _ground_hit()}
+
+  local controller = FPController:new(world, {
+    mass = 10,
+    speed = 4, jump_speed = 6,
+    max_acceleration = 100,
+    max_step_height = 0,
+  })
+
+  local is_jumped = controller:jump(0, -1)
+  luaunit.assert_true(is_jumped)
+
+  -- simulate the cube face cancelling the initial horizontal takeoff velocity
+  collider:setLinearVelocity(vector(0, 5, 0))
+  controller:pre_physics_update(0.1, 1, 0)
+  luaunit.assert_equals(#collider.applied_forces, 1)
+  luaunit.assert_equals(collider.applied_forces[1], vector(0, 0, -400))
+  luaunit.assert_equals(#world.raycast_calls, 1)
+
+  -- changing input while airborne does not change the locked takeoff direction
+  collider:setLinearVelocity(vector(0, 4, 0))
+  controller:pre_physics_update(0.1, 1, 0)
+  luaunit.assert_equals(#collider.applied_forces, 2)
+  luaunit.assert_equals(collider.applied_forces[2], vector(0, 0, -400))
+  luaunit.assert_equals(#world.raycast_calls, 1)
+
+  -- no drive is applied while falling far from ground
+  collider:setLinearVelocity(vector(0, -1, 0))
+  controller:pre_physics_update(0.1, 1, 0)
+  luaunit.assert_equals(#collider.applied_forces, 2)
+  luaunit.assert_equals(#world.raycast_calls, 3)
+
+  -- regular movement resumes after landing
+  collider:setLinearVelocity(vector(4, -1, 0))
+  controller:pre_physics_update(0.1, 1, 0)
+  luaunit.assert_equals(#collider.applied_forces, 3)
+  luaunit.assert_equals(#world.raycast_calls, 4)
+  luaunit.assert_false(controller.is_jump_in_progress)
+  luaunit.assert_false(controller.is_jump_takeoff_pending)
+  luaunit.assert_nil(controller.jump_horizontal_velocity)
+end
+
+function TestFPController.test_descending_jump_accepts_input_near_ground()
+  local collider = MockCollider:new()
+  local world = MockWorld:new(collider)
+  world.raycast_results = {_ground_hit(), false, _ground_hit()}
+
+  local controller = FPController:new(world, {
+    mass = 10,
+    speed = 4, jump_speed = 6,
+    max_acceleration = 100,
+    max_step_height = 0.25,
+  })
+
+  local is_jumped = controller:jump(0, -1)
+  luaunit.assert_true(is_jumped)
+
+  -- finish the takeoff frame
+  controller:pre_physics_update(0.1, 0, 0)
+
+  collider:setLinearVelocity(vector(0, -1, 0))
+  controller:pre_physics_update(0.1, 1, 0)
+
+  luaunit.assert_equals(#collider.applied_forces, 2)
+  luaunit.assert_equals(collider.applied_forces[2], vector(400, 0, 0))
+  luaunit.assert_equals(#world.raycast_calls, 3)
+  luaunit.assert_true(controller.is_jump_in_progress)
+end
+
+function TestFPController.test_jump_while_airborne_does_nothing()
+  local collider = MockCollider:new()
+  collider:setLinearVelocity(vector(1, -2, 3))
+
+  local world = MockWorld:new(collider)
+  world.raycast_results = {false}
+
+  local controller = FPController:new(world, { jump_speed = 6 })
+
+  local is_jumped = controller:jump()
+  luaunit.assert_false(is_jumped)
+
+  luaunit.assert_nil(collider.impulse)
+  luaunit.assert_equals({collider:getLinearVelocity()}, {1, -2, 3})
 end
 
 function TestFPController.test_teleport()

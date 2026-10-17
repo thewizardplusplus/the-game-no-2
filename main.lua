@@ -14,10 +14,12 @@ local PLAYER_HEIGHT = 1.8
 local PLAYER_START_BOTTOM_Y = 5
 local PLAYER_START_Y = PLAYER_START_BOTTOM_Y + PLAYER_HEIGHT / 2
 local PLAYER_SPEED = 1.7
+local PLAYER_RUN_SPEED_SCALE = 1.75
+local PLAYER_JUMP_SPEED = 4
 local MOON_LIGHT_INDEX = 1
 local MOON_DIRECTION = vector(0.321, 0.767, 0.555):normalize()
 local MOON_SHADOW_DISTANCE = 15
-local MOON_SHADOW_ORTHOGRAPHIC_SIZE = 7
+local MOON_SHADOW_ORTHOGRAPHIC_SIZE = 12
 local FLASHLIGHT_LIGHT_INDEX = 2
 local FLASHLIGHT_WIDE_LIGHT_INDEX = 3
 local FLASHLIGHT_FILL_LIGHT_INDEX = 4
@@ -27,20 +29,23 @@ local FLOOR_SIZE = 5
 local FLOOR_THICKNESS = 0.1
 local FLOOR_PLANE_OFFSET = 0.001
 local FLOOR_FRICTION = 0.2
+local WALL_COLLIDER_THICKNESS = 0.1
 local STAIR_LENGTH = FLOOR_SIZE / 2
 local ROOM_DISTANCE = FLOOR_SIZE + STAIR_LENGTH
 local LOWER_ROOM_Z = -ROOM_DISTANCE / 2
 local UPPER_ROOM_Z = ROOM_DISTANCE / 2
+local ELEVATED_ROOM_Z = LOWER_ROOM_Z - FLOOR_SIZE + WALL_COLLIDER_THICKNESS / 2
 local STAIR_STEP_COUNT = 5
 local STAIR_STEP_DEPTH = STAIR_LENGTH / STAIR_STEP_COUNT
 local STAIR_STEP_HEIGHT = 0.2
 local UPPER_ROOM_HEIGHT = STAIR_STEP_COUNT * STAIR_STEP_HEIGHT
 local WALL_HEIGHT = FLOOR_SIZE / 2
-local WALL_COLLIDER_THICKNESS = 0.1
+local ELEVATED_ROOM_HEIGHT = WALL_HEIGHT
 local WALL_FRICTION = 0.8
 local CUBE_SIZE = 0.5
 local CUBE_MASS = 20
 local CUBE_FRICTION = 0.6
+local CUBE_STAIRCASE_LAYER_COUNT = 4
 local MAXIMUM_CARRY_MASS = 40
 local CARRY_MASS_AT_MINIMUM_SPEED = 20
 local MINIMUM_CARRY_SPEED_SCALE = 0.5
@@ -62,8 +67,8 @@ local concrete_shading_material = nil -- BaseMaterial
 local floor_material = nil -- Material
 local stair_floor_material = nil -- Material
 local floor_shading_material = nil -- BaseMaterial
-local wall_material = nil -- Material
-local stair_wall_material = nil -- Material
+local wall_texture = nil -- Texture
+local wall_surface_materials_by_size = {} -- {[string]=Material,...}
 local wall_shading_material = nil -- BaseMaterial
 local base_shading = nil -- BaseShading
 local surface_shader = nil -- Shader
@@ -73,6 +78,9 @@ local is_flashlight_enabled = true
 local shadow = BaseShading.newShadow({ bias = 0.0001 }) -- BaseShadow
 local physics_world = nil -- World
 local player_controller = nil -- FPController
+local player_carry_speed_scale = 1
+local is_running = false
+local is_jump_requested = false
 local carry_controller = nil -- CarryController
 local cube_colliders = {} -- {Collider,...}
 local persistent_cube_colliders = {} -- {[Collider]=boolean,...}
@@ -81,6 +89,7 @@ local floor_sections = {} -- {FloorSection,...}
 local floor_section_materials = {} -- {Material,...}
 local walls = {} -- {Wall,...}
 local wall_materials = {} -- {Material,...}
+local wall_surface_materials = {} -- {Material,...}
 
 local function _get_normalized_input()
   local input_x = (lovr.system.isKeyDown("d") and 1 or 0) - (lovr.system.isKeyDown("a") and 1 or 0)
@@ -133,6 +142,36 @@ local function _get_concrete_material(u_scale, v_scale)
   return concrete_materials[key]
 end
 
+local function _get_wall_surface_material(width, height)
+  assertions.is_number(width)
+  assertions.is_number(height)
+
+  local u_scale, v_scale = 4 * width / FLOOR_SIZE, height / WALL_HEIGHT
+  local key = string.format("%.10g:%.10g", u_scale, v_scale)
+  if wall_surface_materials_by_size[key] == nil then
+    wall_surface_materials_by_size[key] = lovr.graphics.newMaterial({
+      texture = wall_texture,
+      uvScale = {u_scale, v_scale},
+    })
+  end
+
+  return wall_surface_materials_by_size[key]
+end
+
+local function _new_cube(position)
+  assertions.is_table(position)
+
+  local collider =
+    physics_world:newBoxCollider(position, vector(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE))
+  collider:setTag("dynamic")
+  collider:setMass(CUBE_MASS)
+  collider:setFriction(CUBE_FRICTION)
+  collider:setContinuous(true)
+  table.insert(cube_colliders, collider)
+
+  return collider
+end
+
 local function _spawn_cube()
   if #cube_colliders >= MAX_CUBE_COUNT then
     local oldest_cube_collider_index = nil
@@ -151,16 +190,26 @@ local function _spawn_cube()
   local half_spawn_area_size = CUBE_SPAWN_AREA_SIZE / 2
   local cube_x = (2 * lovr.math.random() - 1) * half_spawn_area_size
   local cube_z = UPPER_ROOM_Z + (2 * lovr.math.random() - 1) * half_spawn_area_size
-  local cube_collider = physics_world:newBoxCollider(
-    vector(cube_x, CUBE_SPAWN_HEIGHT, cube_z),
-    vector(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE)
-  )
-  cube_collider:setTag("dynamic")
-  cube_collider:setMass(CUBE_MASS)
-  cube_collider:setFriction(CUBE_FRICTION)
-  cube_collider:setContinuous(true)
+  local cube_collider = _new_cube(vector(cube_x, CUBE_SPAWN_HEIGHT, cube_z))
   _set_random_orientation(cube_collider)
-  table.insert(cube_colliders, cube_collider)
+end
+
+local function _add_cube_staircase()
+  local wall_z = LOWER_ROOM_Z - FLOOR_SIZE / 2
+  local first_cube_z = wall_z + WALL_COLLIDER_THICKNESS / 2 + CUBE_SIZE / 2
+  local cube_x = FLOOR_SIZE / 2 - WALL_COLLIDER_THICKNESS / 2 - CUBE_SIZE / 2
+
+  for _, x_sign in ipairs({-1, 1}) do
+    for layer = 0, CUBE_STAIRCASE_LAYER_COUNT - 1 do
+      local cube_count = CUBE_STAIRCASE_LAYER_COUNT - layer
+      local cube_y = (layer + 0.5) * CUBE_SIZE
+      for step = 0, cube_count - 1 do
+        local cube_z = first_cube_z + step * CUBE_SIZE
+        local collider = _new_cube(vector(x_sign * cube_x, cube_y, cube_z))
+        persistent_cube_colliders[collider] = true
+      end
+    end
+  end
 end
 
 local function _add_floor_section(section)
@@ -180,6 +229,7 @@ local function _add_wall(wall)
 
   table.insert(walls, wall)
   table.insert(wall_materials, _get_concrete_material(1, wall.size.y / wall.size.z))
+  table.insert(wall_surface_materials, _get_wall_surface_material(wall.size.x, wall.size.y))
 
   local collider = physics_world:newBoxCollider(wall.position, wall.size)
   collider:setOrientation(wall.orientation)
@@ -244,16 +294,35 @@ local function _add_stairs()
   end
 end
 
+local function _add_elevated_room_transition_walls()
+  local wall_width, wall_height = FLOOR_SIZE / 2, WALL_HEIGHT / 2
+  local room_joint_z = ELEVATED_ROOM_Z + FLOOR_SIZE / 2
+  local wall_bottom_position = vector(0, WALL_HEIGHT, room_joint_z + wall_width / 2)
+
+  _add_wall(Wall:new(
+    wall_bottom_position + vector(-FLOOR_SIZE / 2, 0, 0),
+    vector(wall_width, wall_height, WALL_COLLIDER_THICKNESS),
+    "left",
+    "room"
+  ))
+  _add_wall(Wall:new(
+    wall_bottom_position + vector(FLOOR_SIZE / 2, 0, 0),
+    vector(wall_width, wall_height, WALL_COLLIDER_THICKNESS),
+    "right",
+    "room"
+  ))
+end
+
 local function _on_held_collider_changed(current_collider)
   if current_collider == nil then
-    player_controller.speed_scale = 1
+    player_carry_speed_scale = 1
     return
   end
 
   persistent_cube_colliders[current_collider] = true
 
   local load_ratio = math.min(current_collider:getMass() / CARRY_MASS_AT_MINIMUM_SPEED, 1)
-  player_controller.speed_scale = 1 - load_ratio * MAXIMUM_CARRY_SPEED_LOSS
+  player_carry_speed_scale = 1 - load_ratio * MAXIMUM_CARRY_SPEED_LOSS
 end
 
 function lovr.load()
@@ -292,12 +361,7 @@ function lovr.load()
     shininess = 48,
   })
 
-  local wall_texture = lovr.graphics.newTexture("resources/textures/wall/wall.png")
-  wall_material = lovr.graphics.newMaterial({ texture = wall_texture, uvScale = {4, 1} })
-  stair_wall_material = lovr.graphics.newMaterial({
-    texture = wall_texture,
-    uvScale = {4 * STAIR_STEP_DEPTH / FLOOR_SIZE, 1},
-  })
+  wall_texture = lovr.graphics.newTexture("resources/textures/wall/wall.png")
   wall_shading_material = BaseShading.newMaterial({
     ambient = {0.25, 0.25, 0.25, 1},
     diffuse = {0.85, 0.85, 0.85, 1},
@@ -305,7 +369,7 @@ function lovr.load()
     shininess = 12,
   })
 
-  base_shading = BaseShading:new({ shadowResolution = 1024 })
+  base_shading = BaseShading:new({ shadowResolution = 2048 })
   surface_shader = base_shading:newSurfaceShader()
 
   ambient = _new_linear_color(0.145, 0.19, 0.35)
@@ -343,14 +407,17 @@ function lovr.load()
   })
   physics_world:disableCollisionBetween("player", "held")
 
+  _add_room(Room:new(vector(0, ELEVATED_ROOM_HEIGHT, ELEVATED_ROOM_Z), "positive"))
   _add_room(Room:new(vector(0, 0, LOWER_ROOM_Z), "positive"))
   _add_room(Room:new(vector(0, UPPER_ROOM_HEIGHT, UPPER_ROOM_Z), "negative"))
   _add_stairs()
+  _add_cube_staircase()
+  _add_elevated_room_transition_walls()
 
   player_controller = FPController:new(physics_world, {
     position = vector(0, PLAYER_START_Y, LOWER_ROOM_Z),
     height = PLAYER_HEIGHT,
-    speed = PLAYER_SPEED,
+    speed = PLAYER_SPEED, jump_speed = PLAYER_JUMP_SPEED,
     -- add a margin to the exact stair height for physics contact imprecision
     max_step_height = STAIR_STEP_HEIGHT + 0.02,
   })
@@ -412,8 +479,8 @@ function lovr.draw(pass)
       MOON_DIRECTION * MOON_SHADOW_DISTANCE,
       -MOON_DIRECTION,
       MOON_SHADOW_ORTHOGRAPHIC_SIZE,
-      8, -- near
-      20 -- far
+      7, -- near
+      22 -- far
     )
   end
 
@@ -452,19 +519,14 @@ function lovr.draw(pass)
   end
 
   base_shading:sendMaterial(pass, wall_shading_material)
-  for _, wall in ipairs(walls) do
-    if wall.surface_kind == "stair" then
-      pass:setMaterial(stair_wall_material)
-    else
-      pass:setMaterial(wall_material)
-    end
-
+  for index, wall in ipairs(walls) do
     local plane_normal = wall.orientation * vector.backward
     local plane_offset = wall.size.z / 2 + FLOOR_PLANE_OFFSET
     local inner_plane_position = wall.position + plane_normal * plane_offset
     local outer_plane_position = wall.position - plane_normal * plane_offset
     local plane_size = vector(wall.size.x, wall.size.y, 0)
     local outer_plane_orientation = quaternion.angleaxis(math.pi, 0, 1, 0) * wall.orientation
+    pass:setMaterial(wall_surface_materials[index])
     pass:plane(inner_plane_position, plane_size, wall.orientation, "fill")
     pass:plane(outer_plane_position, plane_size, outer_plane_orientation, "fill")
   end
@@ -487,6 +549,14 @@ function lovr.update(dt)
   -- apply the player's forces before advancing the physics simulation so they
   -- affect the current frame rather than the next one
   local input_x, input_z = _get_normalized_input()
+  local run_speed_scale = is_running and PLAYER_RUN_SPEED_SCALE or 1
+  player_controller.speed_scale = player_carry_speed_scale * run_speed_scale
+
+  if is_jump_requested then
+    player_controller:jump(input_x, input_z)
+    is_jump_requested = false
+  end
+
   player_controller:pre_physics_update(dt, input_x, input_z)
   carry_controller:pre_physics_update(dt)
 
@@ -504,10 +574,21 @@ function lovr.focus(focused)
   assertions.is_boolean(focused)
 
   _set_mouse_captured(focused)
+  if not focused then
+    is_running, is_jump_requested = false, false
+  end
 end
 
 function lovr.keypressed(key)
   assertions.is_string(key)
+
+  if key == "lshift" then
+    is_running = true
+  end
+
+  if key == "space" then
+    is_jump_requested = true
+  end
 
   if key == "e" then
     carry_controller:toggle()
@@ -529,6 +610,14 @@ function lovr.keypressed(key)
 
   if key == "escape" then
     lovr.event.quit()
+  end
+end
+
+function lovr.keyreleased(key)
+  assertions.is_string(key)
+
+  if key == "lshift" then
+    is_running = false
   end
 end
 

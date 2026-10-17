@@ -4,15 +4,15 @@
 -- A physics-based first-person controller.
 --
 -- The controller uses a dynamic capsule and force-based horizontal movement. It provides mouse
--- look and camera poses, acceleration-limited walking, walkable ground detection, automatic
--- step-up, preserved airborne momentum, and limited pushing force against dynamic bodies. Call
--- @{FPController:pre_physics_update|FPController:pre_physics_update()} immediately before
--- advancing the physics world.
+-- look and camera poses, acceleration-limited walking, jumping, walkable ground detection,
+-- automatic step-up, preserved airborne momentum, and limited pushing force against dynamic
+-- bodies. Call @{FPController:pre_physics_update|FPController:pre_physics_update()} immediately
+-- before advancing the physics world.
 --
--- The controller is designed for mostly flat environments. It does not implement jumping,
--- crouching, traversable slopes, ground snapping, smooth step-up or step-down, or movement
--- inheritance from moving platforms. Camera effects, footsteps, interaction, and other gameplay
--- features are expected to be implemented by the game.
+-- The controller is designed for mostly flat environments. It does not implement crouching,
+-- traversable slopes, ground snapping, smooth step-up or step-down, or movement inheritance
+-- from moving platforms. Camera effects, footsteps, interaction, and other gameplay features
+-- are expected to be implemented by the game.
 --
 -- @classmod FPController
 
@@ -41,6 +41,7 @@ local _MIN_HORIZONTAL_NORMAL_LENGTH = 1e-6 -- dimensionless
 -- @tfield number mass player mass in kilograms (**read-only**)
 -- @tfield number speed walking speed in meters per second
 -- @tfield number speed_scale multiplier applied to walking speed
+-- @tfield number jump_speed upward speed applied by a jump, in meters per second
 -- @tfield number max_acceleration maximum free walking acceleration in meters per second squared
 -- @tfield number max_push_force force limit against dynamic bodies while movement input is nonzero, in newtons
 -- @tfield number max_floor_angle maximum walkable floor angle
@@ -55,6 +56,9 @@ local _MIN_HORIZONTAL_NORMAL_LENGTH = 1e-6 -- dimensionless
 -- @tfield Collider collider controller physics collider (**read-only**)
 -- @tfield Collider|nil ground_collider collider currently serving as the controller's walkable ground, if any (**read-only**)
 -- @tfield Shape|nil ground_shape shape currently serving as the controller's walkable ground, if any (**read-only**)
+-- @tfield boolean is_jump_in_progress whether a jump is in progress (**read-only**)
+-- @tfield boolean is_jump_takeoff_pending whether the jump impulse is pending its first physics update (**read-only**)
+-- @tfield vector|nil jump_horizontal_velocity captured horizontal takeoff velocity, if any (**read-only**)
 
 local FPController = middleclass("FPController")
 
@@ -75,6 +79,7 @@ local FPController = middleclass("FPController")
 -- @tparam[opt=0] number options.friction capsule friction
 -- @tparam[opt=2.5] number options.speed walking speed in meters per second
 -- @tparam[opt=1] number options.speed_scale multiplier applied to walking speed
+-- @tparam[opt=5] number options.jump_speed upward speed applied by a jump, in meters per second
 -- @tparam[opt=12] number options.max_acceleration maximum free walking acceleration in meters per second squared
 -- @tparam[opt=350] number options.max_push_force force limit against dynamic bodies while movement input is nonzero, in newtons
 -- @tparam[opt=math.rad(5)] number options.max_floor_angle maximum walkable floor angle
@@ -106,6 +111,7 @@ function FPController:initialize(world, options)
   options.friction = options.friction or 0
   options.speed = options.speed or 2.5
   options.speed_scale = options.speed_scale or 1
+  options.jump_speed = options.jump_speed or 5
   options.max_acceleration = options.max_acceleration or 12
   options.max_push_force = options.max_push_force or 350
   options.max_floor_angle = options.max_floor_angle or math.rad(5)
@@ -133,6 +139,7 @@ function FPController:initialize(world, options)
   assertions.is_number(options.friction)
   assertions.is_number(options.speed)
   assertions.is_number(options.speed_scale)
+  assertions.is_number(options.jump_speed)
   assertions.is_number(options.max_acceleration)
   assertions.is_number(options.max_push_force)
   assertions.is_number(options.max_floor_angle)
@@ -174,6 +181,7 @@ function FPController:initialize(world, options)
   self.mass = options.mass
   self.speed = options.speed
   self.speed_scale = options.speed_scale
+  self.jump_speed = options.jump_speed
   self.max_acceleration = options.max_acceleration
   self.max_push_force = options.max_push_force
   self.max_floor_angle = options.max_floor_angle
@@ -188,6 +196,7 @@ function FPController:initialize(world, options)
   self.collider = collider
 
   self:_clear_ground_hit()
+  self:_clear_jump()
 end
 
 ---
@@ -243,7 +252,28 @@ function FPController:pre_physics_update(dt, input_x, input_z)
   assertions.is_number(input_x)
   assertions.is_number(input_z)
 
-  local is_grounded = self:is_grounded()
+  local is_grounded
+  if not self.is_jump_in_progress then
+    is_grounded = self:is_grounded()
+  else
+    if self.is_jump_takeoff_pending then
+      self.is_jump_takeoff_pending = false
+      self:_apply_jump_horizontal_drive(dt)
+      return
+    end
+
+    local _, velocity_y, _ = self.collider:getLinearVelocity()
+    if velocity_y > 0 then
+      self:_apply_jump_horizontal_drive(dt)
+      return
+    end
+
+    is_grounded = self:is_grounded()
+    if is_grounded then
+      self:_clear_jump()
+    end
+  end
+
   if not is_grounded then
     local step_search_height = self.max_step_height + self.contact_tolerance
     local near_ground_tolerance = math.max(step_search_height, self.ground_tolerance)
@@ -255,12 +285,7 @@ function FPController:pre_physics_update(dt, input_x, input_z)
     end
   end
 
-  local input = vector(input_x, 0, input_z)
-  -- preserve analog input magnitude; only clamp vectors longer than one
-  input = vectorutils.limit_length(input, 1)
-
-  local direction = quaternion.angleaxis(-self.yaw, 0, 1, 0) * input
-  local has_input = input.x ~= 0 or input.z ~= 0
+  local direction, has_input = self:_get_movement_direction(input_x, input_z)
   local force = self:_calculate_horizontal_force(dt, direction, has_input)
   self.collider:applyForce(force)
 
@@ -285,6 +310,47 @@ function FPController:apply_mouse_move(dx, dy)
 end
 
 ---
+-- ⚠️. Jump if the controller is currently standing on walkable ground. When movement input
+-- is nonzero, it sets the horizontal takeoff velocity relative to the current yaw. Otherwise,
+-- the current horizontal velocity is preserved. While the controller is ascending,
+-- acceleration-limited forces maintain the captured horizontal velocity so an obstacle
+-- at the takeoff point cannot immediately cancel it. Input after takeoff does not affect
+-- the jump until the controller descends within step-search distance of walkable ground.
+-- @tparam[opt=0] number input_x local takeoff input along the X axis
+-- @tparam[opt=0] number input_z local takeoff input along the Z axis
+-- @treturn boolean whether the controller jumped
+function FPController:jump(input_x, input_z)
+  input_x, input_z = input_x or 0, input_z or 0
+
+  assertions.is_number(input_x)
+  assertions.is_number(input_z)
+
+  if not self:is_grounded() then
+    return false
+  end
+
+  local velocity = vector(self.collider:getLinearVelocity())
+  local target_velocity = vector(velocity.x, self.jump_speed, velocity.z)
+
+  local direction, has_input = self:_get_movement_direction(input_x, input_z)
+  if has_input then
+    local desired_velocity = self:_calculate_desired_horizontal_velocity(direction)
+    target_velocity.x, target_velocity.z = desired_velocity.x, desired_velocity.z
+
+    self.jump_horizontal_velocity = vector(target_velocity.x, 0, target_velocity.z)
+  else
+    self.jump_horizontal_velocity = nil
+  end
+
+  self.collider:applyLinearImpulse((target_velocity - velocity) * self.mass)
+  self:_clear_ground_hit()
+  self.is_jump_in_progress = true
+  self.is_jump_takeoff_pending = true
+
+  return true
+end
+
+---
 -- ⚠️. Move the controller immediately and discard its linear momentum.
 -- @tparam vector position target capsule center position
 function FPController:teleport(position)
@@ -293,10 +359,16 @@ function FPController:teleport(position)
   self.collider:setPosition(position)
   self.collider:setLinearVelocity(vector.zero)
   self:_clear_ground_hit()
+  self:_clear_jump()
 end
 
 function FPController:_clear_ground_hit()
   self.ground_collider, self.ground_shape = nil, nil
+end
+
+function FPController:_clear_jump()
+  self.is_jump_in_progress, self.is_jump_takeoff_pending, self.jump_horizontal_velocity =
+    false, false, nil
 end
 
 function FPController:_get_ground_hit_within(distance)
@@ -308,13 +380,38 @@ function FPController:_get_ground_hit_within(distance)
   return self.world:raycast(cast_start, cast_finish, self.ground_filter)
 end
 
+function FPController:_get_movement_direction(input_x, input_z)
+  assertions.is_number(input_x)
+  assertions.is_number(input_z)
+
+  -- preserve analog input magnitude; only clamp vectors longer than one
+  local input = vectorutils.limit_length(vector(input_x, 0, input_z), 1)
+  local direction = quaternion.angleaxis(-self.yaw, 0, 1, 0) * input
+  local has_input = input.x ~= 0 or input.z ~= 0
+  return direction, has_input
+end
+
 function FPController:_calculate_horizontal_force(dt, direction, has_input)
   assertions.is_number(dt)
   assertions.is_table(direction)
   assertions.is_boolean(has_input)
 
+  local desired_velocity = self:_calculate_desired_horizontal_velocity(direction)
+  return self:_calculate_horizontal_force_to_velocity(dt, desired_velocity, has_input)
+end
+
+function FPController:_calculate_desired_horizontal_velocity(direction)
+  assertions.is_table(direction)
+
   local effective_speed = self.speed * self.speed_scale
-  local desired_velocity = direction * effective_speed
+  return direction * effective_speed
+end
+
+function FPController:_calculate_horizontal_force_to_velocity(dt, desired_velocity, has_input)
+  assertions.is_number(dt)
+  assertions.is_table(desired_velocity)
+  assertions.is_boolean(has_input)
+
   local velocity_x, _, velocity_z = self.collider:getLinearVelocity()
   local velocity = vector(velocity_x, 0, velocity_z)
   local velocity_correction_time = math.max(dt, _MIN_VELOCITY_CORRECTION_TIME)
@@ -328,6 +425,19 @@ function FPController:_calculate_horizontal_force(dt, direction, has_input)
   end
 
   return self:_limit_push_force(dt, velocity, force)
+end
+
+function FPController:_apply_jump_horizontal_drive(dt)
+  assertions.is_number(dt)
+
+  if self.jump_horizontal_velocity == nil then
+    return
+  end
+
+  local has_input = true -- the direction was captured from nonzero jump input
+  local force =
+    self:_calculate_horizontal_force_to_velocity(dt, self.jump_horizontal_velocity, has_input)
+  self.collider:applyForce(force)
 end
 
 function FPController:_limit_push_force(dt, velocity, force)
